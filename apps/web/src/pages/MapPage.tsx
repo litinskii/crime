@@ -64,9 +64,10 @@ export default function MapPage({
   const [now, setNow] = useState(() => Date.now());
   const controls = useRef<MapController | null>(null);
   useEffect(() => {
+    if (!online) return;
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(timer);
-  }, []);
+  }, [online]);
   const closeSheet = useCallback(() => setSheet(null), []);
   const closeIncident = useCallback(() => setSelected(null), []);
   const onBounds = useCallback((b: Bounds) => {
@@ -111,7 +112,7 @@ export default function MapPage({
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     staleTime: 30000,
     retry: 1,
-    networkMode: isDemo ? "always" : "online",
+    networkMode: "always",
   });
   const stats = useQuery({
     queryKey: ["statistics", query],
@@ -119,7 +120,7 @@ export default function MapPage({
       incidentsRepository.getStatistics({ ...query, signal }),
     staleTime: 30000,
     retry: 1,
-    networkMode: isDemo ? "always" : "online",
+    networkMode: "always",
   });
   const sourceStatus = useQuery({
     queryKey: ["source-status"],
@@ -128,13 +129,14 @@ export default function MapPage({
     staleTime: 60000,
     refetchInterval: 60000,
     retry: 1,
+    networkMode: "always",
   });
   const updated = sourceStatus.data?.sources[0]?.last_success_at;
   const detail = useQuery({
     queryKey: ["incident", selected],
     queryFn: ({ signal }) => incidentsRepository.getIncident(selected!, signal),
     enabled: Boolean(selected),
-    networkMode: isDemo ? "always" : "online",
+    networkMode: "always",
   });
   const items = useMemo(
     () => incidents.data?.pages.flatMap((p) => p.items) ?? [],

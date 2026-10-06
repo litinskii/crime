@@ -14,7 +14,7 @@ export default function IncidentPage({ dark }: { dark: boolean }) {
     queryKey: ["incident", id],
     queryFn: ({ signal }) => incidentsRepository.getIncident(id!, signal),
     retry: 1,
-    networkMode: isDemo ? "always" : "online",
+    networkMode: "always",
   });
   const share = async () => {
     try {
@@ -72,7 +72,13 @@ export default function IncidentPage({ dark }: { dark: boolean }) {
                   query.data.location.longitude,
                   query.data.location.latitude,
                 ]}
-                zoom={13}
+                zoom={
+                  query.data.location.precision === "city"
+                    ? 9
+                    : query.data.location.precision === "region"
+                      ? 6
+                      : 13
+                }
                 onBounds={() => {}}
                 onSelect={() => {}}
                 onReady={() => {}}
