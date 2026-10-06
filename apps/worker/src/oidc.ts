@@ -1,6 +1,10 @@
 // Trust one workflow on this repository's main branch. No permanent CI secret needed.
 const issuer = "https://token.actions.githubusercontent.com";
 const audience = "crime-radar-ingestion";
+const reject = (reason: string) => {
+  console.warn(JSON.stringify({ event: "harvest-auth-rejected", reason }));
+  return false;
+};
 export const harvestWorkflow =
   "litinskii/crime/.github/workflows/harvest-courts.yml@refs/heads/main";
 let cache:
@@ -47,7 +51,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       claims.iat > now + 30 ||
       claims.iat < now - 600
     )
-      return false;
+      return reject("claims");
     if (
       !cache ||
       cache.until < Date.now() ||
@@ -57,7 +61,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
         signal: AbortSignal.timeout(10000),
         redirect: "error",
       });
-      if (!response.ok) return false;
+      if (!response.ok) return reject(`keys-http-${response.status}`);
       const data = (await response.json()) as {
         keys: (JsonWebKey & { kid?: string })[];
       };
@@ -71,7 +75,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
         key.alg === "RS256" &&
         key.use === "sig",
     );
-    if (!jwk) return false;
+    if (!jwk) return reject("key-not-found");
     const key = await crypto.subtle.importKey(
       "jwk",
       jwk,
@@ -85,7 +89,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       decode(parts[2]),
       new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
     );
-  } catch {
-    return false;
+  } catch (error) {
+    return reject(error instanceof Error ? error.name : "verification-error");
   }
 }

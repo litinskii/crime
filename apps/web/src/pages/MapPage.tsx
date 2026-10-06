@@ -189,7 +189,17 @@ export default function MapPage({
             </span>
             <div>
               <strong>Crime Radar</strong>
-              <span>{t("tagline")}</span>
+              {isDemo ? (
+                <span>{t("tagline")}</span>
+              ) : (
+                <span className="database-total" aria-live="polite">
+                  {t("databaseTotal")}{" "}
+                  <b>
+                    {sourceStatus.data?.total?.toLocaleString(i18n.language) ??
+                      "—"}
+                  </b>
+                </span>
+              )}
             </div>
           </a>
           <button

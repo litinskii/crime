@@ -11,7 +11,7 @@ import type {
   SummaryProvider,
 } from "./types";
 export { gazetteer } from "./geography";
-export const ruleVersion = "rules-v3-full-text-places-3";
+export const ruleVersion = "rules-v3-full-text-places-4";
 export class CityGeocoder implements Geocoder {
   async geocode(place: Place) {
     return gazetteer.find((city) => city.key === place.key) ?? null;

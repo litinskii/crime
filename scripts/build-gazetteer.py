@@ -4,6 +4,7 @@ Only current Ukrainian names and populated places (population >= 1000) are used.
 No incident text is sent to GeoNames. Duplicate names remain ambiguous.
 """
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -18,7 +19,8 @@ for line in zipfile.ZipFile(sys.argv[1]).read("UA.txt").decode().splitlines():
     row = line.split("\t")
     if row[6] != "P" or row[7] == "PPLX" or int(row[14] or 0) < 1000 or row[0] not in names:
         continue
-    variants = sorted(names[row[0]], key=lambda x: (not x[1], x[0]))
+    # GeoNames also tags Latin transliterations as uk; use the Ukrainian script for display.
+    variants = sorted(names[row[0]], key=lambda x: (not bool(re.search(r'[А-Яа-яІіЇїЄєҐґ]', x[0])), not x[1], x[0]))
     places.append({"key": "geonames-" + row[0], "uk": variants[0][0], "en": row[2],
                    "latitude": float(row[4]), "longitude": float(row[5]),
                    "precision": "city", "regionCode": row[10],

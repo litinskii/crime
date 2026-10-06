@@ -58,6 +58,7 @@
   "legal": "Legal qualification",
   "article": "Article {{article}}",
   "status": "Status",
+  "databaseTotal": "Total events in database:",
   "notFound": "Incident not found",
   "language": "Language",
   "theme": "Appearance",

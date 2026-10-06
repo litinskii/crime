@@ -31,10 +31,10 @@ if (
   pages > 10 ||
   !Number.isInteger(runs) ||
   runs < 1 ||
-  runs > 20 ||
+  runs > 200 ||
   (pages > 1 && runs > 1)
 )
-  throw new Error("Use pages 1–10 or runs 1–20");
+  throw new Error("Use pages 1–10 or runs 1–200");
 for (let i = 0; i < Math.max(pages, runs); i++) {
   if (i) await new Promise((resolve) => setTimeout(resolve, 2000));
   const response = await fetch(url, {
