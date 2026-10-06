@@ -25,5 +25,5 @@
       "simple": { "limit": 120, "period": 60 },
     },
   ],
-  "triggers": { "crons": ["*/10 * * * *"] },
+  "triggers": { "crons": ["0 * * * *"] },
 }

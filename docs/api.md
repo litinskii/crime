@@ -2,7 +2,7 @@
 
 `GET /health` reports database readiness. Production returns `storage: d1` and `ingestion: npu-telegram`; local PostgreSQL returns `ingestion: manual-cli`.
 
-`GET /api/v1/status` returns source name/URL, last successful/failed check, published total and city-level coverage. No raw text/review items are public. `POST /internal/ingest` requires a server-side bearer secret and fetches a fixed official source; optional positive numeric `before` backfills one page. It is not an upload endpoint. Cron runs the same pipeline every ten minutes.
+`GET /api/v1/status` returns the configured source registry with kind, check/retry times, last error, pending items and published counts, plus a deduplicated global total. No raw text/review items are public. `POST /internal/ingest?source=<allowlisted-id>` requires a server-side bearer secret; optional positive `before` (Telegram) or `page` (Ukrinform archive) backfills a bounded page. `/internal/articles` accepts up to three allowlisted publisher URLs and fetches originals itself. `/internal/court` accepts up to three validated official RTF metadata entries and 100 withdrawn IDs; the exact main-branch GitHub harvest workflow can authenticate with verified short-lived OIDC. Cron chooses a due web source every ten minutes with persistent failure backoff.
 
 ## List / statistics
 
@@ -30,7 +30,7 @@ Statistics returns `total`, `previousPeriodTotal`, and a count for each category
 
 ## Shared public record
 
-Types live in `packages/shared/src/index.ts`. Fields include bilingual title/description, canonical category, keywords, nullable occurredAt, reportedAt/publishedAt, public latitude/longitude, city/district and approximation/precision, legal qualification, sources, status and confidence. Synthetic fixtures include `synthetic: true`; the frontend displays a demo badge even when they come from the API.
+Types live in `packages/shared/src/index.ts`. Fields include bilingual title/description, canonical category, keywords, nullable occurredAt, optional date-only occurredOn, reportedAt/publishedAt, public latitude/longitude, city/district and approximation/precision, legal qualification, sources, status and confidence. Synthetic fixtures include `synthetic: true`; the frontend displays a demo badge even when they come from the API.
 
 Date filters use occurredAt when available, then reportedAt, then publishedAt. Undated records do not belong to a dated result set. The interface labels the fallback date explicitly. Coordinates are public/approximate coordinates only; exact internal locations and raw documents have separate storage and are never queried by the public repository.
 

@@ -208,8 +208,8 @@ export class PostgresIngestionStore implements IngestionStore {
           );
           await this.db.query(
             `INSERT INTO incidents(id,category,occurred_at,published_at,public_location,location_precision,public_data,search_text,confidence,is_published,canonical_key,fingerprint)
-            VALUES($1,$2,NULL,$3,ST_SetSRID(ST_MakePoint($4,$5),4326),'city',$6,$7,$8,true,$9,$10)
-            ON CONFLICT(id) DO UPDATE SET category=excluded.category,published_at=excluded.published_at,public_location=excluded.public_location,public_data=excluded.public_data,search_text=excluded.search_text,confidence=excluded.confidence,is_published=true,fingerprint=excluded.fingerprint,updated_at=now()`,
+            VALUES($1,$2,$11,$3,ST_SetSRID(ST_MakePoint($4,$5),4326),'city',$6,$7,$8,true,$9,$10)
+            ON CONFLICT(id) DO UPDATE SET category=excluded.category,occurred_at=excluded.occurred_at,published_at=excluded.published_at,public_location=excluded.public_location,public_data=excluded.public_data,search_text=excluded.search_text,confidence=excluded.confidence,is_published=true,fingerprint=excluded.fingerprint,updated_at=now()`,
             [
               incident.id,
               incident.category,
@@ -221,6 +221,10 @@ export class PostgresIngestionStore implements IngestionStore {
               incident.confidence,
               result.canonicalKey,
               result.fingerprint,
+              incident.occurredAt ??
+                (incident.occurredOn
+                  ? `${incident.occurredOn}T00:00:00Z`
+                  : null),
             ],
           );
           await this.db.query(

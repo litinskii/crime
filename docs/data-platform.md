@@ -1,36 +1,33 @@
 # Crime Radar data platform
 
-Based on the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). The first real-data MVP runs in Cloudflare Workers + D1. Fastify and PostgreSQL/PostGIS remain independently runnable for richer spatial needs; production needs no external database host.
+Production is a multi-source Cloudflare Worker/D1 pipeline. See the [source audit](public-sources.md) for verified feeds, registries, archive formats, access failures and attribution.
 
-## First verified source
+## Collection and publication
 
-The collector reads the ordinary public HTML preview of [Ukraine's National Police Telegram channel](https://t.me/s/UA_National_Police). An [official police publication](https://if.npu.gov.ua/news/natspolitsiya-zapustila-shche-odin-nomer-garyachoi-linii-z-poshuku-zniklikh-chi-zagiblikh-vnaslidok-viyskovikh-diy-rf-v-ukraini) links to this channel. Direct police-site collection returned a Cloudflare block and was not used or bypassed.
+- A registry distinguishes official police reports, media and court decisions. Public cards cite the original publisher and identify its kind.
+- Collectors respect robots policies, use a descriptive agent, bounded responses/timeouts, refuse arbitrary hosts/paths/redirects and retry 429/5xx. Blocked police websites remain registered and retry later.
+- Private originals retain source/external ID, URL, title/text, publication/retrieval dates and content hash. Versions allow edits to be traced. No raw/review endpoint is public.
+- D1 stages at most 30 items and processes at most three per run. Small multi-row statements fit the Free request query budget. Leases prevent source overlap; queue state survives pagination. Empty archive pages can still drain pending work.
+- Category extraction prefers an unambiguous headline; supported text evidence is used when the title has no category. Advice, war harm and unsupported/multiple categories are excluded.
+- Settlement lookup uses a maintained offline GeoNames gazetteer with 3,266 populated places and current Ukrainian aliases/declensions. Shared names require regional context. Marks use settlement centres. The frontend's separate quick city search still supports eleven cities.
+- Media/Telegram locations come from the headline or incident-related sentences. Court locations require a dated event narrative; court addresses, residence and birthplaces cannot supply event coordinates. Unknown/ambiguous records stay private for review.
+- Safe bilingual summaries contain constrained incident subtype, place and explicitly detected facts (e.g. reported detention/injuries). Legal articles require an explicit Criminal Code reference; procedural-code articles and category-based guesses are not published. Names, contacts and exact addresses are not copied into cards. This is factual summarisation, not unrestricted translation or general-purpose PII redaction.
+- `occurredOn` records an explicit event day without inventing a time. Date filters use event date when available, otherwise publication date. Cards distinguish these dates. Court publication is never substituted for a known historical event date.
+- Canonical article identity or category/place/content hash merges exact reposts. Court cases share a canonical case key. Similar headlines trigger review, never automatic fuzzy merging. Confidence is source metadata, not calibrated accuracy or a danger score.
+- Edits failing the gate and officially withdrawn court documents retract publication. Access failures alone preserve old reports. Private text/versions expire after 90 days; safe public metadata/provenance remain.
 
-The collector checks robots.txt before each run (currently 404), respects disallows and refuses redirects, access blocks and changed layouts. Requests have a descriptive agent, 15-second timeout, bounded response and three attempts for 429/5xx with backoff. Pagination pauses between pages; production reads one page/request. Only the official channel's numeric post IDs and canonical HTTPS police news URLs are accepted. Links in source text are never executed or followed.
+## Scheduling, history and operations
 
-## Implemented pipeline
+Cloudflare cron selects one due web source at the start of each hour, favouring sources not checked recently. Sources rotate across hourly runs to keep collection within the Free plan's per-invocation query limit. Failed checks back off from one hour to six hours; successful checks reset the delay to one hour. Status reports last attempt/success/failure, next retry, pending items and each source's published count. Settings displays this information without private originals.
 
-Collector → private originals/versions → durable queue → category/city extraction → offline geocoding → safe bilingual metadata → exact dedupe/review → public records → incidents/statistics API.
+`/internal/ingest` selects an allowlisted source and optional archive cursor/page. `/internal/articles` accepts at most three allowlisted article URLs, which the server fetches itself. `/internal/court` accepts at most three official RTF metadata entries or 100 withdrawn IDs. Local imports require the existing bearer secret; court harvesting additionally accepts a cryptographically verified GitHub Actions OIDC token for this exact repository, owner, workflow and main branch.
 
-- Preserve source/external ID, URL, title/text, nullable publication date, retrieval time and SHA-256 hash. Undated gallery posts remain undated.
-- Idempotence compares external identity, hash, publication date, canonical link and rules version. Edits reprocess and retain versions. Hashes are indexed rather than unique, so reposts retain provenance before publication dedupe.
-- D1 stages pages atomically in small batches and drains three items/run. A source lease prevents overlap. Processing retries three times. Cron runs every ten minutes; queued items survive pagination.
-- Classify one supported category from the headline. Advice, war/evacuation and ambiguous categories are excluded. Event time, legal article and case status are not guessed.
-- Recognize ten original cities plus Lutsk and their supported name forms. A gazetteer provides cached centroids. Unknown, region-only or multi-city places stay unpublished for review. No residence/address is sent to an external geocoder.
-- Summaries are Ukrainian/English templates made solely from allowlisted category/city. They explain city-centre precision, unknown event time and the source link. Raw names, contacts and addresses cannot enter them. This is limited metadata, not a full article translation or general-purpose PII redactor.
-- Canonical article identity or category/city/content fingerprint merges exact reposts and preserves source links. Headline similarity ≥0.70 within seven publication days triggers review, never an automatic fuzzy merge. Confidence is fixed metadata, not calibrated accuracy or a danger score.
-- Edited records that fail publication are withdrawn. Source outages alone do not erase records. Raw text/versions expire after 90 days; provenance and safe public summaries remain. Raw/review records have no public endpoint.
+Daily court metadata is too large for a small Worker request: the current ZIP is about 303 MB compressed. A GitHub Actions Python job downloads/streams it, filters active criminal verdicts, posts bounded batches and remembers metadata signatures. It refreshes its short-lived OIDC token during long runs. Checkpoints contain public document metadata only; raw decisions never enter Git/cache. Explicit official status=0 triggers withdrawal. Archive disappearance alone does not imply withdrawal.
 
-Production executes parameterized SQLite bounds/date/category/search queries, keyset pagination and full statistics. It is not PostGIS; advanced spatial analysis can use the retained adapter. PostgreSQL public queries explicitly separate real records from the demo seed.
+Historical media import reads verified monthly sitemaps and resumes from a private local URL checkpoint. Telegram supports numeric `before` pagination; Ukrinform's public news archive supports numbered pages. These imports use the same publication gates and source leases as regular collection.
 
-## Operations and validation
+Tests cover XML namespaces/full article metadata, robots/allowlists, privacy, expanded/ambiguous geography, court heading exclusion, explicit event dates, withdrawal, outage preservation/backoff, queues/leases, exact/review duplicates, retention, pagination/statistics, private-route protection, signed CI authentication and D1 query bounds. Optional PostGIS integration validates the local adapter. Real-source smoke checks supplement fixtures.
 
-Public `/api/v1/status` reports check times and published coverage. Private run history stores counts/errors; statuses/reasons and jobs support investigation without logging originals. Manual collection is bearer-secret protected and fetches a fixed source. No review UI exists yet; Cloudflare account access is required to inspect originals/review rows.
+## Remaining quality work
 
-Tests use fictional HTML/records and execute D1 SQL in SQLite. They cover provenance/date parsing, robots, privacy, exact/review dedupe, edits/retraction, persistent queues, leases, retry bounds, retention, spatial/date filters, search, pagination/statistics, private-route protection and Free-plan query bounds. Optional PostGIS integration validates the other adapter. Real-source smoke runs and HTTPS/browser checks supplement these tests. See [deployment.md](deployment.md) for setup and quotas.
-
-## Remaining work
-
-Additional verified sources; broader maintained geography; reliable event-time/place extraction with confidence/review; fuller privacy-checked summaries/translation; validated legal mappings; authenticated review/correction UI; measured dedupe quality; outage alerts/backfill checkpoints; and larger-scale spatial/search indexes.
-
-Coverage must remain visibly incomplete. City-centre markers and density must not imply actual incident locations or personal safety. Payments, subscriptions, social features and tracking remain outside current scope.
+Authenticated review/corrections; independently verified regional sources; broader settlement morphology; measured duplicate detection across media/police/courts; richer privacy-checked bilingual facts; calibrated confidence and larger-scale spatial/search indexes. Aggregated crime statistics need a separate view and must not become invented map events.

@@ -1,5 +1,6 @@
 import { load } from "cheerio/slim";
 import { hash } from "./hash";
+import { classify, isCandidate } from "./processor";
 import type { RawItem, SourceCollector, SourceDefinition } from "./types";
 
 export const policeSource: SourceDefinition = {
@@ -14,7 +15,7 @@ const agent = "CrimeRadar/0.2 (+https://crime-radar.w-siteee.workers.dev)";
 export class SourceAccessError extends Error {}
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchText(
+export async function fetchText(
   url: string,
   signal?: AbortSignal,
 ): Promise<{ status: number; text: string }> {
@@ -22,7 +23,10 @@ async function fetchText(
     let response: Response;
     try {
       response = await fetch(url, {
-        headers: { "User-Agent": agent, Accept: "text/html,text/plain" },
+        headers: {
+          "User-Agent": agent,
+          Accept: "text/html,application/xml,text/plain,application/rtf",
+        },
         signal: signal
           ? AbortSignal.any([signal, AbortSignal.timeout(15000)])
           : AbortSignal.timeout(15000),
@@ -244,6 +248,10 @@ export class PoliceTelegramCollector implements SourceCollector {
       before = next;
       this.nextBefore = next;
     }
-    return [...items.values()];
+    return [...items.values()].filter(
+      (item) =>
+        isCandidate(item.title) ||
+        classify(item.content.slice(0, 3000)) !== null,
+    );
   }
 }

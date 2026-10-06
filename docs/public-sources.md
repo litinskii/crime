@@ -1,0 +1,42 @@
+# Public-source audit — 6 October 2026
+
+The product needs many **usable incident records**, not a large number of statistical rows. Publication counts, crime totals and court decisions are different units. No completeness or crime-probability claim is made.
+
+## Connected sources
+
+| Source                                                                                                                                                                                  | Access checked                                         | Collection and limits                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| [National Police public channel](https://t.me/s/UA_National_Police)                                                                                                                     | Public HTML; official police site links to it          | Original text, publication dates, canonical police article links; numeric pagination                                                   |
+| [Patrol Police](https://patrolpolice.gov.ua/feed/)                                                                                                                                      | Official WordPress RSS, HTTP 200                       | Full RSS text; current feed has many non-incident publications which are excluded                                                      |
+| [Ukrinform regional news](https://www.ukrinform.ua/rss/rubric-regions)                                                                                                                  | RSS and full articles, HTTP 200                        | Full article text; [paginated archive](https://www.ukrinform.ua/rubric-regions/block-lastnews?page=2) available                        |
+| [ZAXID.NET](https://zaxid.net/home/showRss.do)                                                                                                                                          | Publisher lists its RSS; articles and sitemap HTTP 200 | RSS ISO `dc:date`; full NewsArticle JSON-LD; [monthly sitemap](https://zaxid.net/resources/xml/sitemaps/sitemap202609.xml) for history |
+| [Official court open data, 2026](https://data.gov.ua/dataset/ediniy-derzhavniy-reestr-sudovih-rishen-za-2026-rik_7636)                                                                  | CKAN metadata, ZIP and RTF text host HTTP 200          | Daily archive contains dictionaries and document metadata; criminal verdicts only, ordinary-crime categories only                      |
+| [National Police website](https://npu.gov.ua/timeline?type=posts), [Kyiv Police](https://kyiv.npu.gov.ua/timeline?type=posts), [Lviv Police](https://lv.npu.gov.ua/timeline?type=posts) | Direct requests returned Cloudflare HTTP 403           | Registered collectors retry with persistent backoff; no block bypass and no deletion of historical records                             |
+
+`apps/api/src/ingestion/sources.ts` is the source registry. A configured source is not necessarily available or producing map records. `/api/v1/status` and the Settings sheet show successful checks, outages/retries and published counts.
+
+The September court archive examined locally contains 47,544 active criminal verdicts across 2026, including 5,838 verdicts published since September 1. Across the last 90 publication days, 6,193 verdicts matched the initial category whitelist. These are **candidates**, not automatically geocoded incidents. In a 24-document theft/robbery/fraud sample, three yielded explicit event dates and named settlements; 21 stayed unpublished. Many judgments redact event addresses or concern several episodes.
+
+Court location extraction starts after `ВСТАНОВИВ` and requires a dated event paragraph with an event verb and an explicitly named settlement. The court heading, residence and birthplace are excluded. Martial-law decree dates are not event dates. Conflicting places/dates and unconfirmed categories remain private for review. Verdicts in the same numbered case share a canonical case key. Withdrawn official documents retract public records and remove their stored private versions. A court marker describes an event discussed in a judgment; it does not imply a new crime on the judgment's publication date.
+
+## Other sources and existing projects checked
+
+- [CrimeDataLab](https://crimedatalab.org/) and [its author's public repositories](https://github.com/Nickolay78) aggregate prosecution and judicial statistics. Millions of **statistical indicators** are not millions of geolocated incidents. Useful for a future statistics view; not used to manufacture map points.
+- [ZAXID's Lviv crime map](https://zaxid.net/projects/crime/) and [project description](https://zaxid.net/karta_zlochinnosti_lvova_n1455334) demonstrate official address-based police data for 2015–2017. This is historical coverage, not a current national feed. No unverified export is imported.
+- [Illegal weapons open dataset](https://data.gov.ua/dataset/1f6730f3-b326-4466-b724-3b88cf2aceda) and [murder/severe injury dataset](https://data.gov.ua/dataset/bcc3410c-a585-4576-86fd-93b674c6a456) are aggregate counts/rates. They need a separate statistical unit, period and territorial definition.
+- [Court search](https://reyestr.court.gov.ua/) was unreliable from the test environment. The separate official `od.reyestr.court.gov.ua/files/...rtf` open-data host worked. The latter is used for ingestion; public citations link to the original Review page.
+- [National Police open data](https://npu.gov.ua/diyalnist/vidkriti-dani) and [MVS search](https://mvs.gov.ua/activity/rozsuk) remain candidates for separately defined datasets. Wanted-person records are not incident locations.
+- Suspilne direct homepage access returned 403; no functioning feed was verified in this audit, so no working connector is claimed.
+- [Bellingcat Ukraine Timemap](https://github.com/bellingcat/ukraine-timemap) concerns civilian harm during war. It is not mixed into ordinary crime categories.
+
+## Attribution and reuse
+
+Public cards contain constrained bilingual factual summaries and direct publisher links, not republished articles. Original source text is private with 90-day retention. Access is restricted to allowlisted hosts/paths, checks robots policies and stops on explicit blocks. Robots access alone does not confer a content licence. ZAXID's disallowed archive route is not used; its public monthly sitemaps are used instead.
+
+Settlement coordinates and current Ukrainian names derive from [GeoNames Ukraine data](https://download.geonames.org/export/dump/) and [language-tagged alternate names](https://download.geonames.org/export/dump/alternatenames/). GeoNames is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The generated gazetteer contains 3,266 populated places with recorded population at least 1,000, excluding neighbourhood features; it is not every settlement in Ukraine. Ambiguous names require regional context. Coordinates are settlement centres, not reported street addresses. `scripts/build-gazetteer.py` reproduces the JSON from the official country files. Attribution appears in Settings as well as here.
+
+## Delivery and remaining quality work
+
+Working RSS/article adapters, protected bounded historical imports, durable queues, source retry state, event-date-aware filtering, provenance labels and daily court harvesting are implemented. GitHub Actions authenticates only the exact main-branch court workflow with short-lived signed OIDC tokens, tied to immutable repository/owner IDs; no permanent CI ingestion secret is stored. See [GitHub's OIDC reference](https://docs.github.com/en/actions/reference/security/oidc).
+
+Next quality work is a review/correction interface, more independently verified regional sources, more complete settlement morphology and measured cross-publisher duplicate resolution. Headline similarity is only a review signal. Current summaries preserve a limited set of safe facts; they are not complete translations. A growing map is still a map of public reports with partial geographic and editorial coverage.

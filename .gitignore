@@ -9,3 +9,6 @@ dist/
 coverage/
 playwright-report/
 test-results/
+.court-harvest-state.json
+.court-harvest-state.tmp
+.news-harvest-state.json

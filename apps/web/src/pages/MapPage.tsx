@@ -131,7 +131,11 @@ export default function MapPage({
     retry: 1,
     networkMode: "always",
   });
-  const updated = sourceStatus.data?.sources[0]?.last_success_at;
+  const updated = sourceStatus.data?.sources
+    .map((s) => s.last_success_at)
+    .filter((s): s is string => Boolean(s))
+    .sort()
+    .at(-1);
   const detail = useQuery({
     queryKey: ["incident", selected],
     queryFn: ({ signal }) => incidentsRepository.getIncident(selected!, signal),

@@ -2,7 +2,7 @@ import type {
   D1Database,
   D1PreparedStatement,
 } from "@cloudflare/workers-types";
-import type { Incident } from "@crime-radar/shared";
+import { incidentDate, type Incident } from "@crime-radar/shared";
 import { similarity, ruleVersion } from "../../api/src/ingestion/processor";
 import type {
   IngestionStore,
@@ -16,70 +16,80 @@ export class D1IngestionStore implements IngestionStore {
   private sql(sql: string, ...values: unknown[]) {
     return this.db.prepare(sql).bind(...values);
   }
-  async stage(items: RawItem[]) {
-    if (!items.length || items.length > 30)
+  async stage(items: RawItem[], sourceId = items[0]?.sourceId) {
+    if (
+      !sourceId ||
+      items.length > 30 ||
+      items.some((item) => item.sourceId !== sourceId)
+    )
       throw new Error("Unexpected source page size");
-    const old = await this.sql(
-      `SELECT external_id,content_hash,rules,status,published_at,canonical_url FROM raw_source_items WHERE source_id=? AND external_id IN (${items.map(() => "?").join(",")})`,
-      items[0].sourceId,
-      ...items.map((item) => item.externalId),
-    ).all<{
-      external_id: string;
-      content_hash: string;
-      rules: string;
-      status: string;
-      published_at: string | null;
-      canonical_url: string | null;
-    }>();
-    const previous = new Map(old.results.map((row) => [row.external_id, row]));
-    const changed = items.filter((item) => {
-      const row = previous.get(item.externalId);
-      return (
-        !row ||
-        row.content_hash !== item.contentHash ||
-        row.rules !== ruleVersion ||
-        row.published_at !== item.publishedAt ||
-        row.canonical_url !== (item.canonicalUrl ?? null)
+    if (items.length) {
+      const old = await this.sql(
+        `SELECT external_id,content_hash,rules,status,published_at,canonical_url FROM raw_source_items WHERE source_id=? AND external_id IN (${items.map(() => "?").join(",")})`,
+        items[0].sourceId,
+        ...items.map((item) => item.externalId),
+      ).all<{
+        external_id: string;
+        content_hash: string;
+        rules: string;
+        status: string;
+        published_at: string | null;
+        canonical_url: string | null;
+      }>();
+      const previous = new Map(
+        old.results.map((row) => [row.external_id, row]),
       );
-    });
-    // Multi-row statements keep each run below D1 Free's per-request query limit.
-    for (let start = 0; start < changed.length; start += 6) {
-      const chunk = changed.slice(start, start + 6);
-      const original = this.sql(
-        `INSERT INTO raw_source_items(id,source_id,external_id,source_url,title,content,published_at,retrieved_at,content_hash,rules,canonical_url,status)
+      const changed = items.filter((item) => {
+        const row = previous.get(item.externalId);
+        return (
+          !row ||
+          row.content_hash !== item.contentHash ||
+          row.rules !== ruleVersion ||
+          row.published_at !== item.publishedAt ||
+          row.canonical_url !== (item.canonicalUrl ?? null)
+        );
+      });
+      // Multi-row statements keep each run below D1 Free's per-request query limit.
+      for (let start = 0; start < changed.length; start += 6) {
+        const chunk = changed.slice(start, start + 6);
+        const original = this.sql(
+          `INSERT INTO raw_source_items(id,source_id,external_id,source_url,title,content,published_at,retrieved_at,content_hash,rules,canonical_url,status)
         VALUES ${chunk.map(() => "(?,?,?,?,?,?,?,?,?,?,?,'collected')").join(",")}
         ON CONFLICT(source_id,external_id) DO UPDATE SET title=excluded.title,content=excluded.content,published_at=excluded.published_at,retrieved_at=excluded.retrieved_at,content_hash=excluded.content_hash,rules=excluded.rules,canonical_url=excluded.canonical_url,status='collected',reason=NULL,attempts=0`,
-        ...chunk.flatMap((item) => [
-          crypto.randomUUID(),
-          item.sourceId,
-          item.externalId,
-          item.sourceUrl,
-          item.title,
-          item.content,
-          item.publishedAt,
-          item.retrievedAt,
-          item.contentHash,
-          ruleVersion,
-          item.canonicalUrl ?? null,
-        ]),
-      );
-      const version = this.sql(
-        `INSERT OR IGNORE INTO raw_source_item_versions(raw_id,content_hash,title,content,published_at,retrieved_at)
+          ...chunk.flatMap((item) => [
+            crypto.randomUUID(),
+            item.sourceId,
+            item.externalId,
+            item.sourceUrl,
+            item.title,
+            item.content,
+            item.publishedAt,
+            item.retrievedAt,
+            item.contentHash,
+            ruleVersion,
+            item.canonicalUrl ?? null,
+          ]),
+        );
+        const version = this.sql(
+          `INSERT OR IGNORE INTO raw_source_item_versions(raw_id,content_hash,title,content,published_at,retrieved_at)
         SELECT id,content_hash,title,content,published_at,retrieved_at FROM raw_source_items WHERE source_id=? AND external_id IN (${chunk.map(() => "?").join(",")})`,
+          items[0].sourceId,
+          ...chunk.map((item) => item.externalId),
+        );
+        await this.db.batch([original, version]);
+      }
+      await this.sql(
+        `UPDATE raw_source_items SET retrieved_at=? WHERE source_id=? AND external_id IN (${items.map(() => "?").join(",")})`,
+        items[0].retrievedAt,
         items[0].sourceId,
-        ...chunk.map((item) => item.externalId),
-      );
-      await this.db.batch([original, version]);
+        ...items.map((item) => item.externalId),
+      ).run();
     }
-    await this.sql(
-      `UPDATE raw_source_items SET retrieved_at=? WHERE source_id=? AND external_id IN (${items.map(() => "?").join(",")})`,
-      items[0].retrievedAt,
-      items[0].sourceId,
-      ...items.map((item) => item.externalId),
-    ).run();
     const queue = await this.sql(
-      "SELECT * FROM raw_source_items WHERE source_id=? AND (status='collected' OR (status='failed' AND attempts<3)) ORDER BY retrieved_at,external_id LIMIT 3",
-      items[0].sourceId,
+      "SELECT * FROM raw_source_items WHERE source_id=? AND (status='collected' OR (status='failed' AND attempts<3) OR (rules<>? AND content NOT IN ('[expired]','[withdrawn]'))) ORDER BY CASE WHEN rules<>? THEN 0 ELSE 1 END,retrieved_at,external_id LIMIT 3",
+      sourceId,
+      ruleVersion,
+      ruleVersion,
     ).all<{
       source_id: string;
       external_id: string;
@@ -105,7 +115,7 @@ export class D1IngestionStore implements IngestionStore {
   }
   async begin(source: SourceDefinition) {
     await this.sql(
-      "INSERT INTO sources(id,name,url,metadata) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata",
+      "INSERT INTO sources(id,name,url,metadata) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,name=excluded.name,url=excluded.url",
       source.id,
       source.name,
       source.url,
@@ -113,11 +123,13 @@ export class D1IngestionStore implements IngestionStore {
         verificationUrl: source.verificationUrl,
         rules: ruleVersion,
         rawRetentionDays: 90,
+        kind: source.kind ?? "official",
       }),
     ).run();
     const lease = await this.sql(
-      "UPDATE sources SET lease_until=? WHERE id=? AND lease_until<?",
+      "UPDATE sources SET lease_until=?,last_attempt_at=? WHERE id=? AND lease_until<?",
       Date.now() + 600000,
+      new Date().toISOString(),
       source.id,
       Date.now(),
     ).run();
@@ -208,15 +220,18 @@ export class D1IngestionStore implements IngestionStore {
         result.canonicalKey,
         result.fingerprint,
       ).first<{ id: string; public_data: string }>();
-      const candidates = await this.sql(
-        `SELECT r.title FROM incidents i JOIN incident_sources s ON s.incident_id=i.id JOIN raw_source_items r ON r.id=s.raw_id
+      const candidates =
+        raw.sourceId === "court-decisions"
+          ? { results: [] }
+          : await this.sql(
+              `SELECT r.title FROM incidents i JOIN incident_sources s ON s.incident_id=i.id JOIN raw_source_items r ON r.id=s.raw_id
         WHERE i.category=? AND i.city=? AND i.effective_date BETWEEN ? AND ? AND i.id<>? LIMIT 30`,
-        incident.category,
-        incident.location.city,
-        Date.parse(raw.publishedAt!) - 7 * 86400000,
-        Date.parse(raw.publishedAt!) + 7 * 86400000,
-        incident.id,
-      ).all<{ title: string }>();
+              incident.category,
+              incident.location.city,
+              Date.parse(raw.publishedAt!) - 7 * 86400000,
+              Date.parse(raw.publishedAt!) + 7 * 86400000,
+              incident.id,
+            ).all<{ title: string }>();
       if (
         !existing &&
         candidates.results.some(
@@ -248,6 +263,7 @@ export class D1IngestionStore implements IngestionStore {
           incident.description?.uk,
           incident.description?.en,
           ...incident.keywords,
+          incident.legalQualification?.article,
         ]
           .join(" ")
           .toLocaleLowerCase("uk");
@@ -266,7 +282,7 @@ export class D1IngestionStore implements IngestionStore {
             incident.category,
             incident.location.latitude,
             incident.location.longitude,
-            Date.parse(incident.publishedAt!),
+            Date.parse(incidentDate(incident)!),
             incident.publishedAt,
             incident.location.city,
             JSON.stringify(incident),
@@ -345,8 +361,10 @@ export class D1IngestionStore implements IngestionStore {
         runId,
       ),
       this.sql(
-        `UPDATE sources SET lease_until=0,${error ? "last_failure_at" : "last_success_at"}=? WHERE id=?`,
+        `UPDATE sources SET lease_until=0,${error ? "last_failure_at" : "last_success_at"}=?,last_error=?,next_attempt_at=? + ${error ? "MIN(21600000,3600000*(1 << MIN(consecutive_failures,3)))" : "3600000"},consecutive_failures=${error ? "consecutive_failures+1" : "0"} WHERE id=?`,
         now,
+        error ?? null,
+        Date.now(),
         source.id,
       ),
       this.sql(

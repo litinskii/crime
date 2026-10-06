@@ -16,12 +16,16 @@ export interface SourceDefinition {
   name: string;
   url: string;
   verificationUrl: string;
+  kind?: "official" | "media" | "court";
+  transport?: "telegram" | "rss" | "police-web" | "court";
+  archiveUrl?: string;
 }
 export interface SourceCollector {
   source: SourceDefinition;
   collect(options?: {
     pages?: number;
     before?: number;
+    page?: number;
     signal?: AbortSignal;
   }): Promise<RawItem[]>;
 }
@@ -32,6 +36,8 @@ export interface Place {
   latitude: number;
   longitude: number;
   precision: "city";
+  aliases?: string[];
+  regionCode?: string;
 }
 export interface Geocoder {
   geocode(place: Place): Promise<Place | null>;
@@ -40,9 +46,17 @@ export interface SummaryProvider {
   summarize(
     category: IncidentCategory,
     place: Place,
+    facts?: ExtractedFacts,
   ): Incident["title"] & {
     description: NonNullable<Incident["description"]>;
   };
+}
+export interface ExtractedFacts {
+  subtype?: { uk: string; en: string };
+  article?: string;
+  status?: Incident["status"];
+  occurredOn?: string;
+  details: { uk: string; en: string }[];
 }
 export type Processed =
   | { status: "rejected" | "review"; reason: string }
@@ -64,7 +78,7 @@ export interface RunResult {
 export interface IngestionStore {
   begin(source: SourceDefinition): Promise<string | null>;
   /** Stage a page and drain a bounded, durable work queue. */
-  stage?(items: RawItem[]): Promise<RawItem[]>;
+  stage?(items: RawItem[], sourceId?: string): Promise<RawItem[]>;
   saveRaw(item: RawItem): Promise<{ id: string; changed: boolean }>;
   record(
     id: string,

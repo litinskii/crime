@@ -91,8 +91,16 @@
   "recent": "Recent incidents",
   "viewMap": "Explore the map",
   "dateRange": "{{from}} – {{to}}",
-  "liveReports": "Official reports",
-  "liveCoverage": "One police source, partial coverage. Markers show city centres, not incident sites.",
+  "liveReports": "Public reports",
+  "liveCoverage": "Police, media and court reports. Partial coverage; markers show settlement centres.",
   "dataUpdated": "Source checked: {{date}}",
-  "cityCentre": "Centre of the mentioned city — the incident site is unknown"
+  "cityCentre": "Centre of the mentioned city — the incident site is unknown",
+  "dataSources": "Data sources",
+  "sourceKindofficial": "Official source",
+  "sourceKindmedia": "Media",
+  "sourceKindcourt": "Court registry",
+  "sourceReports": "{{count}} reports on the map",
+  "sourceRetry": "Source unavailable. Next retry: {{date}}",
+  "sourcePending": "Awaiting collection",
+  "coordinateAttribution": "Settlement coordinates:"
 }

@@ -63,8 +63,14 @@ export class ApiIncidentsRepository implements IncidentsRepository {
 export interface SourceStatus {
   mode: "live";
   sources: {
+    id: string;
     name: string;
     url: string;
+    kind: "official" | "media" | "court";
+    published?: number;
+    pending?: number;
+    next_attempt_at?: number;
+    last_error?: string | null;
     last_success_at: string | null;
     last_failure_at: string | null;
   }[];

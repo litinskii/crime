@@ -10,6 +10,7 @@ import {
 import BottomSheet from "../components/BottomSheet";
 import { CategoryIcon, categoryColors } from "../components/Icon";
 import { IncidentDate } from "../components/IncidentCard";
+import { getSourceStatus, isDemo } from "../repositories/incidents";
 import { usePreferences, type Period } from "../stores/preferences";
 import {
   analytics,
@@ -205,6 +206,12 @@ export function SearchSheet({
 export function SettingsSheet({ onClose }: { onClose: () => void }) {
   const { t, i18n } = useTranslation();
   const { theme, set } = usePreferences();
+  const sources = useQuery({
+    queryKey: ["source-status"],
+    queryFn: ({ signal }) => getSourceStatus(signal),
+    enabled: !isDemo,
+    staleTime: 60000,
+  });
   return (
     <BottomSheet title={t("settings")} onClose={onClose}>
       <h3 className="section-label">{t("language")}</h3>
@@ -244,6 +251,57 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
           <p>{t("installIos")}</p>
         </div>
       </div>
+      {!isDemo && (
+        <>
+          <h3 className="section-label">{t("dataSources")}</h3>
+          {sources.data?.sources.map((source) => (
+            <div className="source-status" key={source.id}>
+              <a href={source.url} target="_blank" rel="noopener noreferrer">
+                {source.name}
+              </a>
+              <p className="small subtle">
+                {t(`sourceKind${source.kind}`)} ·{" "}
+                {t("sourceReports", { count: source.published ?? 0 })}
+              </p>
+              <p className="small subtle">
+                {source.last_error
+                  ? t("sourceRetry", {
+                      date: source.next_attempt_at
+                        ? new Date(source.next_attempt_at).toLocaleString(
+                            i18n.language === "uk" ? "uk-UA" : "en-GB",
+                          )
+                        : "—",
+                    })
+                  : source.last_success_at
+                    ? t("dataUpdated", {
+                        date: new Date(source.last_success_at).toLocaleString(
+                          i18n.language === "uk" ? "uk-UA" : "en-GB",
+                        ),
+                      })
+                    : t("sourcePending")}
+              </p>
+            </div>
+          ))}
+          <p className="small subtle">
+            {t("coordinateAttribution")}{" "}
+            <a
+              href="https://www.geonames.org/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              GeoNames
+            </a>{" "}
+            ·{" "}
+            <a
+              href="https://creativecommons.org/licenses/by/4.0/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              CC BY 4.0
+            </a>
+          </p>
+        </>
+      )}
     </BottomSheet>
   );
 }

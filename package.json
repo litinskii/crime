@@ -23,7 +23,9 @@
     "db:seed": "npm run db:seed -w @crime-radar/api",
     "ingest": "npm run ingest -w @crime-radar/api",
     "ingest:worker": "node scripts/ingest-worker.mjs",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "ingest:news": "node scripts/harvest-news.mjs",
+    "ingest:courts": "python3 scripts/harvest-courts.py"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261006.1",

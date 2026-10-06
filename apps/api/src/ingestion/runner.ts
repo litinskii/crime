@@ -4,7 +4,12 @@ import type { IngestionStore, RunResult, SourceCollector } from "./types";
 export async function ingest(
   collector: SourceCollector,
   store: IngestionStore,
-  options: { pages?: number; before?: number; signal?: AbortSignal } = {},
+  options: {
+    pages?: number;
+    before?: number;
+    page?: number;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<RunResult | null> {
   const runId = await store.begin(collector.source);
   if (!runId) return null;
@@ -21,7 +26,9 @@ export async function ingest(
   try {
     const items = await collector.collect(options);
     stats.discovered = items.length;
-    const work = store.stage ? await store.stage(items) : items;
+    const work = store.stage
+      ? await store.stage(items, collector.source.id)
+      : items;
     for (const raw of work) {
       const saved = await store.saveRaw(raw);
       if (!saved.changed) continue;

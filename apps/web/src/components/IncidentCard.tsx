@@ -13,7 +13,7 @@ export function IncidentDate({ incident }: { incident: Incident }) {
     <>
       <span>
         {t(
-          incident.occurredAt
+          incident.occurredAt || incident.occurredOn
             ? "occurred"
             : incident.reportedAt
               ? "reported"
@@ -23,10 +23,26 @@ export function IncidentDate({ incident }: { incident: Incident }) {
         )}
       </span>
       {date && (
-        <time dateTime={date}>
-          {format(new Date(date), "d MMM yyyy · HH:mm", {
-            locale: i18n.language === "uk" ? uk : enGB,
-          })}
+        <time
+          dateTime={
+            incident.occurredOn && !incident.occurredAt
+              ? incident.occurredOn
+              : date
+          }
+        >
+          {format(
+            new Date(
+              incident.occurredOn && !incident.occurredAt
+                ? `${incident.occurredOn}T00:00:00`
+                : date,
+            ),
+            incident.occurredOn && !incident.occurredAt
+              ? "d MMM yyyy"
+              : "d MMM yyyy · HH:mm",
+            {
+              locale: i18n.language === "uk" ? uk : enGB,
+            },
+          )}
         </time>
       )}
     </>
@@ -97,6 +113,11 @@ export function IncidentCard({
         const url = safeSourceUrl(source.url);
         return (
           <div key={index} className="source-row">
+            {source.kind && (
+              <span className="subtle small">
+                {t(`sourceKind${source.kind}`)}
+              </span>
+            )}
             {url ? (
               <a href={url} target="_blank" rel="noopener noreferrer">
                 {source.name}

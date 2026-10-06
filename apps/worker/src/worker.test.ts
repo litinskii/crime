@@ -1,5 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, afterEach, describe, it, expect } from "vitest";
 import type { D1Database } from "@cloudflare/workers-types";
 import { D1IngestionStore } from "./store";
@@ -9,6 +9,7 @@ import { policeSource } from "../../api/src/ingestion/collector";
 import { hash } from "../../api/src/ingestion/hash";
 import { ingest } from "../../api/src/ingestion/runner";
 import type { RawItem } from "../../api/src/ingestion/types";
+import { sourceById } from "../../api/src/ingestion/sources";
 
 // Execute the actual D1 SQL against SQLite, including transactional batch semantics.
 class Statement {
@@ -46,12 +47,11 @@ class SQLite {
   sqlite = new DatabaseSync(":memory:");
   queries = 0;
   constructor() {
-    this.sqlite.exec(
-      readFileSync(
-        new URL("../migrations/0001_data.sql", import.meta.url),
-        "utf8",
-      ),
-    );
+    const dir = new URL("../migrations/", import.meta.url);
+    for (const file of readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort())
+      this.sqlite.exec(readFileSync(new URL(file, dir), "utf8"));
   }
   prepare(text: string) {
     return new Statement(this, text);
@@ -184,6 +184,14 @@ describe("durable ingestion and public D1 API", () => {
         .get()?.n,
     ).toBe(2);
   });
+  it("reprocesses old publication rules even when the collector no longer selects that record", async () => {
+    await run([await item(1)]);
+    sqlite.sqlite.exec(
+      "UPDATE raw_source_items SET title='Роковини трагедії Бабиного Яру',content='Пам’ять про загиблих',rules='obsolete'",
+    );
+    expect((await run([]))?.rejected).toBe(1);
+    expect((await repo.getIncidents(query)).total).toBe(0);
+  });
   it("queues similar reports for review instead of guessing a merge", async () => {
     await run([await item(1), await item(2, undefined, "Changed details")]);
     expect((await repo.getIncidents(query)).total).toBe(1);
@@ -235,10 +243,80 @@ describe("durable ingestion and public D1 API", () => {
     const fetch = (path: string, method = "GET") =>
       worker.fetch(new Request(`https://example.test${path}`, { method }), env);
     expect((await fetch("/internal/ingest", "POST")).status).toBe(401);
+    expect((await fetch("/internal/court", "POST")).status).toBe(401);
+    expect((await fetch("/internal/articles", "POST")).status).toBe(401);
     expect((await fetch("/api/v1/raw")).status).toBe(404);
     expect((await fetch("/api/v1/incidents?north=bad")).status).toBe(400);
     expect((await fetch("/api/v1/incidents/no-such-id")).status).toBe(404);
     expect((await fetch("/health")).status).toBe(200);
+  });
+  it("retains published reports during source outages and schedules increasingly delayed retries", async () => {
+    await run([await item(1)]);
+    const collector = {
+      source: policeSource,
+      collect: async () => {
+        throw new Error("Source access failed: HTTP 403");
+      },
+    };
+    await expect(ingest(collector, store)).rejects.toThrow("HTTP 403");
+    const first = sqlite.sqlite
+      .prepare("SELECT * FROM sources WHERE id=?")
+      .get(policeSource.id)!;
+    expect(first.consecutive_failures).toBe(1);
+    expect(Number(first.next_attempt_at)).toBeGreaterThanOrEqual(
+      Date.now() + 3599000,
+    );
+    await expect(ingest(collector, store)).rejects.toThrow("HTTP 403");
+    const second = sqlite.sqlite
+      .prepare("SELECT * FROM sources WHERE id=?")
+      .get(policeSource.id)!;
+    expect(second.consecutive_failures).toBe(2);
+    expect(
+      Number(second.next_attempt_at) - Number(first.next_attempt_at),
+    ).toBeGreaterThanOrEqual(3599000);
+    expect((await repo.getIncidents(query)).total).toBe(1);
+  });
+  it("withdraws court records and private versions when the official registry removes a document", async () => {
+    const source = sourceById("court-decisions")!;
+    const content =
+      "Справа №123/456/26\nВСТАНОВИВ:\n01.09.2026 у м. Тернополі викрав велосипед.";
+    const original = {
+      ...(await item(1)),
+      sourceId: source.id,
+      externalId: "123",
+      title: "Вирок: Крадіжка",
+      content,
+      contentHash: await hash(content),
+      sourceUrl: "https://reyestr.court.gov.ua/Review/123",
+    };
+    expect(
+      (await ingest({ source, collect: async () => [original] }, store))
+        ?.published,
+    ).toBe(1);
+    const request = new Request("https://example.test/internal/court", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${"x".repeat(64)}` },
+      body: JSON.stringify({ documents: [], withdrawn: ["123"] }),
+    });
+    expect(
+      (
+        await worker.fetch(request, {
+          DB: sqlite.db,
+          ASSETS: { fetch: async () => new Response() },
+          INGESTION_SECRET: "x".repeat(64),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM incidents WHERE is_published=1")
+        .get()?.n,
+    ).toBe(0);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM raw_source_item_versions")
+        .get()?.n,
+    ).toBe(0);
   });
   it("expires private text after 90 days while preserving public provenance", async () => {
     await run([await item(1)]);

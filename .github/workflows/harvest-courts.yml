@@ -1,0 +1,37 @@
+name: Update court reports
+on:
+  schedule:
+    - cron: "40 5 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/harvest-courts.yml"
+      - "scripts/harvest-courts.py"
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: court-harvest
+  cancel-in-progress: false
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache/restore@v4
+        with:
+          path: .court-harvest-state.json
+          key: court-harvest-v3-${{ github.run_id }}
+          restore-keys: court-harvest-v3-
+      - name: Collect official registry reports
+        run: python scripts/harvest-courts.py --limit=1000
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .court-harvest-state.json
+          key: court-harvest-v3-${{ github.run_id }}

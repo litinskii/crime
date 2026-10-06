@@ -9,6 +9,12 @@ const url = new URL(
 const before = process.argv
   .find((arg) => arg.startsWith("--before="))
   ?.slice(9);
+const source = process.argv
+  .find((arg) => arg.startsWith("--source="))
+  ?.slice(9);
+if (source) url.searchParams.set("source", source);
+const page = process.argv.find((arg) => arg.startsWith("--page="))?.slice(7);
+if (page) url.searchParams.set("page", page);
 if (before) {
   if (!/^[1-9][0-9]*$/.test(before)) throw new Error("Invalid cursor");
   url.searchParams.set("before", before);
@@ -36,7 +42,11 @@ for (let i = 0; i < Math.max(pages, runs); i++) {
     headers: { Authorization: `Bearer ${secret}` },
     signal: AbortSignal.timeout(60000),
   });
-  const body = await response.json();
+  const body = await response.json().catch(() => {
+    throw new Error(
+      `Worker returned a non-JSON response (HTTP ${response.status})`,
+    );
+  });
   console.log(JSON.stringify({ status: response.status, ...body }));
   if (!response.ok) {
     process.exitCode = 1;

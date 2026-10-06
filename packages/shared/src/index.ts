@@ -14,6 +14,7 @@ export type Locale = "uk" | "en";
 export type LocalizedText = { uk: string; en: string };
 export interface IncidentSource {
   name: string;
+  kind?: "official" | "media" | "court";
   url?: string;
   publishedAt?: string;
 }
@@ -24,6 +25,8 @@ export interface Incident {
   category: IncidentCategory;
   keywords: string[];
   occurredAt: string | null;
+  /** An explicitly extracted event date when the event's time is unknown. */
+  occurredOn?: string;
   reportedAt?: string;
   publishedAt?: string;
   location: {
@@ -238,7 +241,12 @@ export function createMockIncidents(now = new Date()): Incident[] {
   });
 }
 export function incidentDate(item: Incident): string | undefined {
-  return item.occurredAt ?? item.reportedAt ?? item.publishedAt;
+  return (
+    item.occurredAt ??
+    (item.occurredOn ? `${item.occurredOn}T00:00:00.000Z` : undefined) ??
+    item.reportedAt ??
+    item.publishedAt
+  );
 }
 export function filterIncidents(
   items: Incident[],
