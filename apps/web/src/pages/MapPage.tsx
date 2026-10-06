@@ -65,7 +65,7 @@ export default function MapPage({
   const controls = useRef<MapController | null>(null);
   useEffect(() => {
     if (!online) return;
-    const timer = setInterval(() => setNow(Date.now()), 60000);
+    const timer = setInterval(() => setNow(Date.now()), 60 * 60 * 1000);
     return () => clearInterval(timer);
   }, [online]);
   const closeSheet = useCallback(() => setSheet(null), []);
@@ -126,8 +126,8 @@ export default function MapPage({
     queryKey: ["source-status"],
     queryFn: ({ signal }) => getSourceStatus(signal),
     enabled: !isDemo,
-    staleTime: 60000,
-    refetchInterval: 60000,
+    staleTime: 60 * 60 * 1000,
+    refetchInterval: 60 * 60 * 1000,
     retry: 1,
     networkMode: "always",
   });

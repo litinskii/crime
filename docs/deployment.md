@@ -49,7 +49,7 @@ Each run stages up to 30 eligible candidates from a page and processes at most t
 
 `.github/workflows/harvest-courts.yml` downloads the official daily ZIP at 05:40 UTC, streams criminal verdict metadata, and submits bounded RTF references. It also runs on its own workflow/script changes and can be dispatched manually. An Actions cache holds only public IDs/metadata signatures. Authentication uses GitHub-signed, short-lived OIDC tokens, refreshed during long runs; no repository secret is required. The Worker verifies issuer, audience, signature, time bounds, immutable repository/owner IDs, main branch and exact workflow path. Forks, PR workflows and unrelated jobs cannot ingest. The OIDC token is accepted only by the court endpoint. Explicit status=0 records are withdrawn. A failed harvest is visible in Actions; the next daily run resumes from the last checkpoint.
 
-Cloudflare web-source retries back off from one hour to six hours, retaining historical public records. The cron runs at the start of each hour and rotates one due source per tick, so an individual source can be checked less frequently. Historical backfills run separately. Check `/api/v1/status` for actual check/retry times.
+Cloudflare web-source retries back off from one hour to six hours, retaining historical public records. The cron runs at the start of each hour and rotates one due source per tick, so an individual source can be checked less frequently. The open map also refreshes its period and database/source status automatically once an hour. Historical backfills run separately. Check `/api/v1/status` for actual check/retry times.
 
 ## Quotas
 
