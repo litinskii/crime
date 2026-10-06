@@ -24,6 +24,7 @@ const exceptions: Record<string, string[]> = {
   "Кам'янець-Подільський": ["Кам'янці-Подільському", "Кам'янця-Подільського"],
   Тернопіль: ["Тернополі", "Тернополя"],
   Рівне: ["Рівному", "Рівного"],
+  Рокитне: ["Рокитному", "Рокитного", "Рокитним"],
   Миколаїв: ["Миколаєві", "Миколаєва"],
   Хмельницький: ["Хмельницькому", "Хмельницького"],
   Запоріжжя: ["Запоріжжі"],
@@ -52,7 +53,7 @@ function variants(name: string) {
   return result;
 }
 for (const place of gazetteer) {
-  for (const alias of place.aliases ?? [place.uk])
+  for (const alias of new Set([place.uk, place.en, ...(place.aliases ?? [])]))
     for (const form of variants(alias)) {
       const key = normalize(form),
         old = forms.get(key) ?? [];
@@ -60,19 +61,27 @@ for (const place of gazetteer) {
         forms.set(key, [...old, place]);
     }
 }
-export function mentionedPlaces(text: string): Place[] {
+function placeMentions(text: string): Place[][] {
   const tokens = normalize(text).match(/[\p{L}]+(?:['-][\p{L}]+)*/gu) ?? [];
-  const found = new Map<string, Place>();
+  const found: Place[][] = [];
   for (let i = 0; i < tokens.length; i++)
     for (let n = 3; n >= 1; n--) {
       const matches = forms.get(tokens.slice(i, i + n).join(" "));
       if (!matches) continue;
-      // A name shared by several settlements requires an explicit regional context.
-      for (const p of matches) found.set(p.key, p);
+      found.push(matches);
       i += n - 1;
       break;
     }
-  return [...found.values()];
+  return found;
+}
+export function mentionedPlaces(text: string): Place[] {
+  return [
+    ...new Map(
+      placeMentions(text)
+        .flat()
+        .map((place) => [place.key, place]),
+    ).values(),
+  ];
 }
 const regions: Record<string, RegExp> = {
   "01": /Черкащ|Черкаськ/iu,
@@ -101,19 +110,43 @@ const regions: Record<string, RegExp> = {
   "26": /Запоріжж|Запорізьк/iu,
   "27": /Житомирщ|Житомирськ/iu,
 };
-export function resolvePlace(text: string, context = text): Place | null {
-  let found = mentionedPlaces(text);
-  if (found.length > 1) {
-    const codes = Object.entries(regions)
-      .filter(([, re]) => re.test(context))
-      .map(([code]) => code);
-    if (codes.length === 1)
-      found = found.filter((place) => place.regionCode === codes[0]);
+export function resolvePlace(
+  text: string,
+  context = text,
+  sourceRegionCode?: string,
+): Place | null {
+  const mentions = placeMentions(text);
+  if (!mentions.length) return null;
+  const codes = Object.entries(regions)
+    .filter(([, re]) => re.test(context))
+    .map(([code]) => code);
+  // Region evidence resolves homonyms only. It cannot remove a separately named city.
+  const region =
+    codes.length === 1
+      ? codes[0]
+      : codes.length === 0
+        ? sourceRegionCode
+        : undefined;
+  const resolved: Place[] = [];
+  for (const matches of mentions) {
+    const candidates =
+      matches.length > 1 && region
+        ? matches.filter((place) => place.regionCode === region)
+        : matches;
+    if (candidates.length !== 1) return null;
+    resolved.push(candidates[0]);
   }
-  return found.length === 1 ? found[0] : null;
+  const unique = [
+    ...new Map(resolved.map((place) => [place.key, place])).values(),
+  ];
+  return unique.length === 1 ? unique[0] : null;
 }
 /** A geographic cue must precede the name; compound landmarks cannot become village names. */
-export function placeAfterCue(text: string, context = text): Place | null {
+export function placeAfterCue(
+  text: string,
+  context = text,
+  sourceRegionCode?: string,
+): Place | null {
   const tokens = text.match(/[\p{L}]+(?:['’ʼ-][\p{L}]+)*/gu) ?? [];
   for (let n = Math.min(3, tokens.length); n >= 1; n--) {
     if (!forms.has(normalize(tokens.slice(0, n).join(" ")))) continue;
@@ -123,7 +156,11 @@ export function placeAfterCue(text: string, context = text): Place | null {
       /^\p{Lu}/u.test(tokens[0] ?? "")
     )
       return null;
-    return resolvePlace(tokens.slice(0, n).join(" "), context);
+    return resolvePlace(
+      tokens.slice(0, n).join(" "),
+      context,
+      sourceRegionCode,
+    );
   }
   return null;
 }

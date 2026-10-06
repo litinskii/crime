@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Search, MapPin, Check, Info } from "lucide-react";
 import {
   categories,
+  kyivCalendarRange,
   type Incident,
   type IncidentStatistics,
 } from "@crime-radar/shared";
@@ -24,20 +25,22 @@ export function FiltersSheet({ onClose }: { onClose: () => void }) {
   const [draft, setDraft] = useState({
     categories: preferences.categories,
     period: preferences.period,
+    dateBasis: preferences.dateBasis,
     keyword: preferences.keyword,
     customFrom: preferences.customFrom,
     customTo: preferences.customTo,
   });
-  const valid =
-    draft.period !== "custom" ||
-    Boolean(
-      draft.customFrom &&
-      draft.customTo &&
-      draft.customFrom <= draft.customTo &&
-      Date.parse(`${draft.customTo}T23:59:59.999`) -
-        Date.parse(`${draft.customFrom}T00:00:00`) <=
-        366 * 86400000,
-    );
+  let valid = true;
+  if (draft.period === "custom") {
+    try {
+      const range = kyivCalendarRange(draft.customFrom, draft.customTo);
+      valid =
+        draft.customFrom <= draft.customTo &&
+        Date.parse(range.to) - Date.parse(range.from) <= 366 * 86400000;
+    } catch {
+      valid = false;
+    }
+  }
   return (
     <BottomSheet title={t("filters")} onClose={onClose} initial="expanded">
       <h3 className="section-label">{t("categories")}</h3>
@@ -66,6 +69,19 @@ export function FiltersSheet({ onClose }: { onClose: () => void }) {
             <CategoryIcon category={category} size={17} />
             <span>{t(`incidents:category.${category}`)}</span>
             {draft.categories.includes(category) && <Check size={15} />}
+          </button>
+        ))}
+      </div>
+      <h3 className="section-label">{t("periodBasis")}</h3>
+      <div className="period-options">
+        {(["event", "publication"] as const).map((basis) => (
+          <button
+            key={basis}
+            aria-pressed={draft.dateBasis === basis}
+            className={draft.dateBasis === basis ? "selected" : ""}
+            onClick={() => setDraft({ ...draft, dateBasis: basis })}
+          >
+            {t(basis === "event" ? "dateBasisEvent" : "dateBasisPublication")}
           </button>
         ))}
       </div>
@@ -113,7 +129,13 @@ export function FiltersSheet({ onClose }: { onClose: () => void }) {
           onChange={(e) => setDraft({ ...draft, keyword: e.target.value })}
         />
       </label>
-      <p className="small subtle">{t("dateFilterNote")}</p>
+      <p className="small subtle">
+        {t(
+          draft.dateBasis === "event"
+            ? "eventFilterNote"
+            : "publicationFilterNote",
+        )}
+      </p>
       <div className="sheet-actions">
         <button
           className="text-button"
@@ -121,6 +143,7 @@ export function FiltersSheet({ onClose }: { onClose: () => void }) {
             setDraft({
               categories: [],
               period: "7d",
+              dateBasis: "event",
               keyword: "",
               customFrom: "",
               customTo: "",
@@ -280,6 +303,20 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
                       })
                     : t("sourcePending")}
               </p>
+              {source.lastNewItemAt && (
+                <p className="small subtle">
+                  {t("sourceNewItem", {
+                    date: new Date(source.lastNewItemAt).toLocaleString(
+                      i18n.language === "uk" ? "uk-UA" : "en-GB",
+                    ),
+                  })}
+                </p>
+              )}
+              {Boolean(source.pending) && (
+                <p className="small subtle">
+                  {t("sourceBacklog", { count: source.pending })}
+                </p>
+              )}
             </div>
           ))}
           <p className="small subtle">

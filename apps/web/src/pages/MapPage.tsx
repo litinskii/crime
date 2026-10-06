@@ -23,7 +23,11 @@ import {
   ArrowUpRight,
   WifiOff,
 } from "lucide-react";
-import { type Bounds, type IncidentQuery } from "@crime-radar/shared";
+import {
+  kyivCalendarRange,
+  type Bounds,
+  type IncidentQuery,
+} from "@crime-radar/shared";
 import {
   usePreferences,
   initialBounds,
@@ -65,7 +69,7 @@ export default function MapPage({
   const controls = useRef<MapController | null>(null);
   useEffect(() => {
     if (!online) return;
-    const timer = setInterval(() => setNow(Date.now()), 60 * 60 * 1000);
+    const timer = setInterval(() => setNow(Date.now()), 5 * 60 * 1000);
     return () => clearInterval(timer);
   }, [online]);
   const closeSheet = useCallback(() => setSheet(null), []);
@@ -81,15 +85,20 @@ export default function MapPage({
   }, []);
   const query = useMemo<IncidentQuery>(() => {
     const days = { "24h": 1, "7d": 7, "30d": 30, "1y": 365 };
+    const custom =
+      preferences.period === "custom"
+        ? kyivCalendarRange(preferences.customFrom, preferences.customTo)
+        : null;
     return {
       ...bounds,
+      dateBasis: preferences.dateBasis,
       from:
         preferences.period === "custom"
-          ? new Date(`${preferences.customFrom}T00:00:00`).toISOString()
+          ? custom!.from
           : new Date(now - days[preferences.period] * 86400000).toISOString(),
       to:
         preferences.period === "custom"
-          ? new Date(`${preferences.customTo}T23:59:59.999`).toISOString()
+          ? custom!.to
           : new Date(now).toISOString(),
       categories: preferences.categories,
       query: preferences.keyword,
@@ -99,6 +108,7 @@ export default function MapPage({
     bounds,
     now,
     preferences.period,
+    preferences.dateBasis,
     preferences.customFrom,
     preferences.customTo,
     preferences.categories,
@@ -317,6 +327,12 @@ export default function MapPage({
                     to: preferences.customTo,
                   })
                 : t(preferences.period)}
+              {" · "}
+              {t(
+                preferences.dateBasis === "event"
+                  ? "dateBasisEvent"
+                  : "dateBasisPublication",
+              )}
               {change !== null && (
                 <span className="period-change">
                   {" "}

@@ -23,7 +23,12 @@ import {
 } from "../../api/src/ingestion/court";
 import { authorizedHarvester } from "./oidc";
 import { D1IncidentsRepository } from "./repository";
-import { D1IngestionStore } from "./store";
+import { D1IngestionStore, maintainPrivateData, type RunKind } from "./store";
+import { ruleVersion } from "../../api/src/ingestion/processor";
+import type {
+  SourceCollector,
+  SourceDefinition,
+} from "../../api/src/ingestion/types";
 export interface Env {
   DB: D1Database;
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -55,6 +60,65 @@ async function authorized(request: Request, secret?: string) {
   for (let i = 0; i < a.length; i++) delta |= a[i] ^ b[i];
   return delta === 0;
 }
+
+/** One source, one page, at most three queued items per hourly tick. Due polling has
+ * priority; free slots drain the existing queue without another network fetch. */
+export async function runScheduledTick(
+  db: D1Database,
+  definitions: readonly SourceDefinition[] = scheduledSources,
+  collectorFactory: (sourceId: string) => SourceCollector = createCollector,
+  now = Date.now(),
+) {
+  if (!definitions.length) return null;
+  if (definitions.length > 20)
+    throw new Error("Scheduled source bound exceeded");
+  await db
+    .prepare(
+      `INSERT INTO sources(id,name,url,metadata) VALUES ${definitions.map(() => "(?,?,?,?)").join(",")} ON CONFLICT(id) DO NOTHING`,
+    )
+    .bind(
+      ...definitions.flatMap((source) => [
+        source.id,
+        source.name,
+        source.url,
+        JSON.stringify({
+          kind: source.kind,
+          cadenceMinutes: source.cadenceMinutes ?? 60,
+        }),
+      ]),
+    )
+    .run();
+  const ids = definitions.map((source) => source.id),
+    placeholders = ids.map(() => "?").join(",");
+  const due = await db
+    .prepare(
+      `SELECT id FROM sources WHERE id IN (${placeholders}) AND next_attempt_at<=? AND lease_until<? ORDER BY next_attempt_at,COALESCE(last_attempt_at,''),id LIMIT 1`,
+    )
+    .bind(...ids, now, now)
+    .first<{ id: string }>();
+  const pending = due
+    ? null
+    : await db
+        .prepare(
+          `SELECT s.id FROM sources s WHERE s.id IN (${placeholders}) AND s.lease_until<? AND s.next_process_at<=? AND EXISTS(SELECT 1 FROM raw_source_items r WHERE r.source_id=s.id AND (r.status='collected' OR (r.status='failed' AND r.attempts<3) OR (r.rules<>? AND r.content NOT IN ('[expired]','[withdrawn]')))) ORDER BY COALESCE(s.last_processed_at,''),s.id LIMIT 1`,
+        )
+        .bind(...ids, now, now, ruleVersion)
+        .first<{ id: string }>();
+  const selected = due ?? pending;
+  if (!selected) return null;
+  const source = definitions.find((source) => source.id === selected.id)!;
+  const runKind: RunKind = due ? "poll" : "process";
+  const collector = due
+    ? collectorFactory(source.id)
+    : { source, collect: async () => [] };
+  const result = await ingest(
+    collector,
+    new D1IngestionStore(db, { runKind, now: () => now }),
+    { pages: 1 },
+  );
+  return { source: source.id, runKind, result };
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -86,7 +150,9 @@ export default {
           return json({ error: "Invalid source URLs" }, 400);
         const result = await ingest(
           new WebCollector(source, input.urls as string[]),
-          new D1IngestionStore(env.DB),
+          new D1IngestionStore(env.DB, {
+            runKind: input.urls.length ? "backfill" : "process",
+          }),
         );
         return json({ result, skipped: !result });
       }
@@ -119,34 +185,25 @@ export default {
           )
         )
           return json({ error: "Invalid court metadata" }, 400);
-        if (input.withdrawn.length) {
-          const placeholders = input.withdrawn.map(() => "?").join(",");
-          await env.DB.batch([
-            env.DB.prepare(
-              `UPDATE incidents SET is_published=0 WHERE id IN (SELECT x.incident_id FROM incident_sources x JOIN raw_source_items r ON r.id=x.raw_id WHERE r.source_id='court-decisions' AND r.external_id IN (${placeholders}))`,
-            ).bind(...input.withdrawn),
-            env.DB.prepare(
-              `UPDATE raw_source_items SET status='rejected',reason='withdrawn-from-registry',content='[withdrawn]',title='[withdrawn]' WHERE source_id='court-decisions' AND external_id IN (${placeholders})`,
-            ).bind(...input.withdrawn),
-            env.DB.prepare(
-              `DELETE FROM raw_source_item_versions WHERE raw_id IN (SELECT id FROM raw_source_items WHERE source_id='court-decisions' AND external_id IN (${placeholders}))`,
-            ).bind(...input.withdrawn),
-          ]);
-        }
-        const result =
-          input.documents.length || !input.withdrawn.length
-            ? await ingest(
-                new CourtCollector(input.documents),
-                new D1IngestionStore(env.DB),
-              )
-            : null;
+        const court = new CourtCollector(input.documents);
+        const store = new D1IngestionStore(env.DB, { runKind: "backfill" });
+        const result = await ingest(
+          {
+            source: court.source,
+            collect: async () => {
+              await store.withdraw("court-decisions", input.withdrawn!);
+              return court.collect();
+            },
+          },
+          store,
+        );
         return json({
           result,
-          withdrawn: input.withdrawn.length,
-          skipped: input.documents.length > 0 && !result,
+          withdrawn: result ? input.withdrawn.length : 0,
+          skipped: !result,
         });
       }
-      if (url.pathname === "/internal/ingest") {
+      if (["/internal/ingest", "/internal/process"].includes(url.pathname)) {
         if (request.method !== "POST")
           return json({ error: "Method not allowed" }, 405);
         if (!(await authorized(request, env.INGESTION_SECRET)))
@@ -160,8 +217,8 @@ export default {
         )
           return json({ error: "Invalid cursor" }, 400);
         const sourceId = url.searchParams.get("source") ?? policeSource.id;
-        if (!scheduledSources.some((s) => s.id === sourceId))
-          return json({ error: "Invalid source" }, 400);
+        const source = sourceById(sourceId);
+        if (!source) return json({ error: "Invalid source" }, 400);
         const page = url.searchParams.has("page")
           ? Number(url.searchParams.get("page"))
           : undefined;
@@ -170,16 +227,48 @@ export default {
           (!Number.isSafeInteger(page) || page < 1 || page > 1000)
         )
           return json({ error: "Invalid page" }, 400);
-        const collector = createCollector(sourceId);
-        const result = await ingest(collector, new D1IngestionStore(env.DB), {
-          pages: 1,
-          before,
-          page,
-        });
+        const drain = url.searchParams.get("drain");
+        if (drain !== null && drain !== "1")
+          return json({ error: "Invalid drain flag" }, 400);
+        const kind =
+          url.pathname === "/internal/process" || drain === "1"
+            ? "process"
+            : (url.searchParams.get("runKind") ??
+              (before !== undefined || page !== undefined
+                ? "backfill"
+                : "poll"));
+        if (
+          !["poll", "process", "backfill"].includes(kind) ||
+          (kind === "process" &&
+            (before !== undefined || page !== undefined)) ||
+          (drain === "1" &&
+            url.searchParams.has("runKind") &&
+            url.searchParams.get("runKind") !== "process")
+        )
+          return json({ error: "Invalid run kind" }, 400);
+        if (
+          kind !== "process" &&
+          !scheduledSources.some((source) => source.id === sourceId)
+        )
+          return json({ error: "Invalid source" }, 400);
+        const collector =
+          kind === "process"
+            ? { source, collect: async () => [], nextBefore: undefined }
+            : createCollector(sourceId);
+        const result = await ingest(
+          collector,
+          new D1IngestionStore(env.DB, { runKind: kind as RunKind }),
+          {
+            pages: 1,
+            before,
+            page,
+          },
+        );
         return json({
           result,
           skipped: !result,
           nextBefore: collector.nextBefore,
+          runKind: kind,
         });
       }
       if (url.pathname === "/health") {
@@ -198,11 +287,22 @@ export default {
         return json({ error: "Too many requests" }, 429);
       if (url.pathname === "/api/v1/status") {
         const state = await env.DB.prepare(
-          `SELECT s.id,s.name,s.url,s.last_success_at,s.last_failure_at,s.last_attempt_at,s.next_attempt_at,s.consecutive_failures,s.last_error,
-          (SELECT COUNT(DISTINCT x.incident_id) FROM incident_sources x JOIN raw_source_items r ON r.id=x.raw_id JOIN incidents i ON i.id=x.incident_id WHERE r.source_id=s.id AND i.is_published=1) AS published,
-          (SELECT COUNT(*) FROM raw_source_items r WHERE r.source_id=s.id AND r.status='collected') AS pending
+          `SELECT s.id,s.name,s.url,s.last_success_at,s.last_failure_at,s.last_attempt_at,s.next_attempt_at,s.consecutive_failures,s.last_error,s.last_processed_at,s.processing_error,s.next_process_at,
+          (SELECT COUNT(DISTINCT x.incident_id) FROM incident_sources x JOIN raw_source_items r ON r.id=x.raw_id JOIN incidents i ON i.id=x.incident_id WHERE r.source_id=s.id AND x.active=1 AND i.is_published=1) AS published,
+          (SELECT COUNT(*) FROM raw_source_items r WHERE r.source_id=s.id AND (r.status='collected' OR (r.status='failed' AND r.attempts<3) OR (r.rules<>? AND r.content NOT IN ('[expired]','[withdrawn]')))) AS pending,
+          (SELECT MIN(first_seen_at) FROM raw_source_items r WHERE r.source_id=s.id AND (r.status='collected' OR (r.status='failed' AND r.attempts<3) OR (r.rules<>? AND r.content NOT IN ('[expired]','[withdrawn]')))) AS oldestPendingAt,
+          (SELECT MAX(published_at) FROM raw_source_items r WHERE r.source_id=s.id) AS latestPublicationAt,
+          (SELECT MAX(first_seen_at) FROM raw_source_items r WHERE r.source_id=s.id) AS lastNewItemAt
           FROM sources s ORDER BY s.id`,
-        ).all<{ id: string }>();
+        )
+          .bind(ruleVersion, ruleVersion)
+          .all<{ id: string; last_processed_at: string | null }>();
+        const counts = await env.DB.prepare(
+          "SELECT source_id,status,COUNT(*) AS total FROM raw_source_items GROUP BY source_id,status",
+        ).all<{ source_id: string; status: string; total: number }>();
+        const reasons = await env.DB.prepare(
+          "SELECT source_id,reason,COUNT(*) AS total FROM raw_source_items WHERE status IN ('rejected','review','failed') AND reason IS NOT NULL GROUP BY source_id,reason",
+        ).all<{ source_id: string; reason: string; total: number }>();
         const count = await env.DB.prepare(
           "SELECT COUNT(*) AS total FROM incidents WHERE is_published=1",
         ).first<{ total: number }>();
@@ -211,6 +311,29 @@ export default {
           sources: sources.map((source) => ({
             ...source,
             ...state.results.find((row) => row.id === source.id),
+            lastProcessedAt:
+              state.results.find((row) => row.id === source.id)
+                ?.last_processed_at ?? null,
+            counts: Object.fromEntries(
+              [
+                "published",
+                "duplicate",
+                "review",
+                "rejected",
+                "failed",
+                "collected",
+              ].map((status) => [
+                status,
+                counts.results.find(
+                  (row) => row.source_id === source.id && row.status === status,
+                )?.total ?? 0,
+              ]),
+            ),
+            rejectionReasons: Object.fromEntries(
+              reasons.results
+                .filter((row) => row.source_id === source.id)
+                .map((row) => [row.reason, row.total]),
+            ),
             configured: true,
           })),
           total: count?.total ?? 0,
@@ -251,41 +374,20 @@ export default {
     }
   },
   scheduled(
-    _controller: ScheduledController,
+    controller: ScheduledController,
     env: Env,
     context: ExecutionContext,
   ) {
-    let selectedSource: string | undefined;
     context.waitUntil(
-      (async () => {
-        await env.DB.prepare(
-          `INSERT INTO sources(id,name,url,metadata) VALUES ${scheduledSources.map(() => "(?,?,?,?)").join(",")} ON CONFLICT(id) DO NOTHING`,
-        )
-          .bind(
-            ...scheduledSources.flatMap((s) => [
-              s.id,
-              s.name,
-              s.url,
-              JSON.stringify({ kind: s.kind }),
-            ]),
-          )
-          .run();
-        const due = await env.DB.prepare(
-          "SELECT id FROM sources WHERE id<>'court-decisions' AND next_attempt_at<=? AND lease_until<? ORDER BY COALESCE(last_attempt_at,''),id LIMIT 1",
-        )
-          .bind(Date.now(), Date.now())
-          .first<{ id: string }>();
-        if (!due || !scheduledSources.some((s) => s.id === due.id)) return null;
-        selectedSource = due.id;
-        return ingest(createCollector(due.id), new D1IngestionStore(env.DB), {
-          pages: 1,
-        });
-      })()
+      (controller.cron === "15 2 * * *"
+        ? maintainPrivateData(env.DB)
+        : runScheduledTick(env.DB)
+      )
         .then((result) => {
           console.log(
             JSON.stringify({
               event: "ingestion",
-              source: selectedSource,
+              maintenance: controller.cron === "15 2 * * *",
               result,
             }),
           );
@@ -294,7 +396,6 @@ export default {
           console.error(
             JSON.stringify({
               event: "ingestion-failed",
-              source: selectedSource,
             }),
           );
         }),

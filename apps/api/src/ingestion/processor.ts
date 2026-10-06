@@ -2,6 +2,13 @@ import type { IncidentCategory, LocalizedText } from "@crime-radar/shared";
 import { hash } from "./hash";
 import { gazetteer, placeAfterCue, resolvePlace } from "./geography";
 import { sourceById } from "./sources";
+import {
+  explicitDates,
+  extractEventDate,
+  kyivCalendarDay,
+  eventPublicationIssue,
+} from "./event-date";
+import type { EventDateEvidence } from "./event-date";
 import type {
   ExtractedFacts,
   Geocoder,
@@ -11,47 +18,21 @@ import type {
   SummaryProvider,
 } from "./types";
 export { gazetteer } from "./geography";
-export const ruleVersion = "rules-v3-full-text-places-4";
+export const ruleVersion = "rules-v4-event-date-region-evidence-4";
 export class CityGeocoder implements Geocoder {
   async geocode(place: Place) {
     return gazetteer.find((city) => city.key === place.key) ?? null;
   }
 }
 export const extractPlace = resolvePlace;
-const months: Record<string, number> = {
-  січня: 1,
-  лютого: 2,
-  березня: 3,
-  квітня: 4,
-  травня: 5,
-  червня: 6,
-  липня: 7,
-  серпня: 8,
-  вересня: 9,
-  жовтня: 10,
-  листопада: 11,
-  грудня: 12,
-};
-function explicitDates(text: string): string[] {
-  const dates: string[] = [];
-  for (const m of text.matchAll(/\b(\d{1,2})[./](\d{1,2})[./](20\d{2})\b/g))
-    dates.push(`${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`);
-  for (const m of text.matchAll(
-    /\b(\d{1,2})\s+(січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)\s+(20\d{2})/giu,
-  ))
-    dates.push(
-      `${m[3]}-${String(months[m[2].toLowerCase()]).padStart(2, "0")}-${m[1].padStart(2, "0")}`,
-    );
-  return [...new Set(dates)].filter((d) => {
-    const parsed = new Date(`${d}T00:00:00Z`);
-    return Number.isFinite(+parsed) && parsed.toISOString().startsWith(d);
-  });
-}
 const eventVerb =
   /викрав|таємн.{0,30}викрад|заволоді[вл]|наніс|нанесл|вдарив|ударив|вчинив|скоїв|зіткнув|наїхав|підпалив|збував|продав|придбав|зберігав/iu;
-export function courtEvent(
-  raw: RawItem,
-): { place: Place; occurredOn: string; content: string } | null {
+export function courtEvent(raw: RawItem): {
+  place: Place;
+  occurredOn: string;
+  content: string;
+  eventDateEvidence: EventDateEvidence;
+} | null {
   const text = raw.content.replace(
     /в\s+с\s+т\s+а\s+н\s+о\s+в\s+и\s+в/giu,
     "ВСТАНОВИВ",
@@ -64,8 +45,12 @@ export function courtEvent(
       /Допитаний|У судовому засіданні|Дослідивши|Досліджені судом|Суд вважає/iu,
     )[0]
     .slice(0, 12000);
-  const candidates: { place: Place; occurredOn: string; content: string }[] =
-    [];
+  const candidates: {
+    place: Place;
+    occurredOn: string;
+    content: string;
+    eventDateEvidence: EventDateEvidence;
+  }[] = [];
   for (const paragraph of narrative.split(/\n/)) {
     if (
       !eventVerb.test(paragraph) ||
@@ -79,7 +64,7 @@ export function courtEvent(
     if (
       date.length !== 1 ||
       /Указ|Закону|постанови/iu.test(paragraph.slice(0, 50)) ||
-      Date.parse(date[0]) > Date.parse(raw.publishedAt ?? "")
+      date[0] > (kyivCalendarDay(raw.publishedAt) ?? "")
     )
       continue;
     // Require a named settlement within the event paragraph, never the court heading.
@@ -96,6 +81,17 @@ export function courtEvent(
         place: places[0],
         occurredOn: date[0],
         content: paragraph,
+        eventDateEvidence: {
+          kind: "explicit",
+          text:
+            paragraph
+              .slice(0, 120)
+              .match(
+                /(?:20\d{2}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]20\d{2}|\d{1,2}\s+\p{L}+\s+20\d{2})/u,
+              )?.[0] ?? date[0],
+          sourceUrl: raw.sourceUrl,
+          timeZone: "Europe/Kyiv",
+        },
       });
   }
   if (
@@ -215,21 +211,10 @@ export function extractFacts(
   category: IncidentCategory,
 ): ExtractedFacts {
   const text = raw.content;
-  const days = new Set<string>();
-  if (raw.sourceId !== "court-decisions")
-    for (const paragraph of text.split(/\n/)) {
-      if (
-        !eventVerb.test(paragraph) ||
-        /суд|вирок|засуд|підозру|затрим|розсліду|Указ/iu.test(paragraph)
-      )
-        continue;
-      const dates = explicitDates(paragraph);
-      if (
-        dates.length === 1 &&
-        Date.parse(dates[0]) <= Date.parse(raw.publishedAt ?? "")
-      )
-        days.add(dates[0]);
-    }
+  const date =
+    raw.sourceId === "court-decisions"
+      ? { status: "unknown" as const }
+      : extractEventDate(text, raw);
   const subtype = subtypes.find(
     ([cat, re]) => cat === category && re.test(text),
   )?.[2];
@@ -278,10 +263,12 @@ export function extractFacts(
     article,
     status,
     details,
-    occurredOn: days.size === 1 ? [...days][0] : undefined,
+    occurredOn: date.status === "known" ? date.occurredOn : undefined,
+    eventDateEvidence: date.status === "known" ? date.evidence : undefined,
+    dateReviewReason: date.status === "review" ? date.reason : undefined,
   };
 }
-function incidentPlace(raw: RawItem): Place | null {
+function incidentPlace(raw: RawItem, sourceRegionCode?: string): Place | null {
   if (raw.sourceId === "court-decisions") {
     return courtEvent(raw)?.place ?? null;
   }
@@ -293,13 +280,25 @@ function incidentPlace(raw: RawItem): Place | null {
   ];
   const titleCues = cues(raw.title);
   if (titleCues.length) {
-    const places = titleCues.map((m) => placeAfterCue(m[1], context));
+    const places = titleCues.map((m) =>
+      placeAfterCue(m[1], context, sourceRegionCode),
+    );
     if (places.some((p) => !p)) return null;
     const unique = [...new Map(places.map((p) => [p!.key, p!])).values()];
-    const whole = resolvePlace(raw.title, context);
-    return unique.length === 1 && whole?.key === unique[0].key
-      ? unique[0]
-      : null;
+    const whole = resolvePlace(raw.title, context, sourceRegionCode);
+    if (unique.length !== 1 || whole?.key !== unique[0].key) return null;
+    // A title may name the reporting police office. An explicitly located,
+    // dated episode must agree; a single category does not imply one city.
+    for (const sentence of raw.content.split(/\n|(?<=[.!?])\s+/u)) {
+      if (extractEventDate(sentence, raw).status !== "known") continue;
+      const episodeCues = cues(sentence);
+      if (!episodeCues.length) continue;
+      if (
+        resolvePlace(sentence, context, sourceRegionCode)?.key !== unique[0].key
+      )
+        return null;
+    }
+    return unique[0];
   }
   const candidates = new Map<string, Place>();
   for (const sentence of raw.content.split(/\n|(?<=[.!?])\s+/u)) {
@@ -313,7 +312,7 @@ function incidentPlace(raw: RawItem): Place | null {
     )
       continue;
     for (const match of cues(sentence)) {
-      const place = placeAfterCue(match[1], context);
+      const place = placeAfterCue(match[1], context, sourceRegionCode);
       if (place) candidates.set(place.key, place);
     }
   }
@@ -368,18 +367,15 @@ export class IncidentProcessor {
       Date.parse(raw.publishedAt) > Date.now() + 300000
     )
       return { status: "review", reason: "invalid-publication-time" };
-    const place = incidentPlace(raw);
+    const place = incidentPlace(raw, source.regionCode);
     if (!place)
       return { status: "review", reason: "unknown-or-multiple-cities" };
     const located = await this.geocoder.geocode(place);
     if (!located) return { status: "review", reason: "geocoding-unavailable" };
-    const caseNumber =
+    const canonicalKey =
       source.kind === "court"
-        ? raw.content.match(/Справа\s*№\s*([\d/-]+)/iu)?.[1]
-        : undefined;
-    const canonicalKey = caseNumber
-      ? `court-case:${caseNumber}`
-      : (raw.canonicalUrl ?? raw.sourceUrl);
+        ? `court-document:${raw.externalId}`
+        : (raw.canonicalUrl ?? raw.sourceUrl);
     const identity = await hash(raw.canonicalUrl ?? raw.sourceUrl);
     const event = source.kind === "court" ? courtEvent(raw) : null;
     if (event && classify(event.content) !== category)
@@ -387,11 +383,21 @@ export class IncidentProcessor {
         status: "review",
         reason: "court-category-not-confirmed-in-event",
       };
+    const body = raw.content.startsWith(raw.title)
+      ? raw.content.slice(raw.title.length)
+      : raw.content;
+    const eventIssue = eventPublicationIssue(event?.content ?? body);
+    if (eventIssue) return { status: "rejected", reason: eventIssue };
     const facts = extractFacts(
       event ? { ...raw, content: event.content } : raw,
       category,
     );
-    if (event) facts.occurredOn = event.occurredOn;
+    if (event) {
+      facts.occurredOn = event.occurredOn;
+      facts.eventDateEvidence = event.eventDateEvidence;
+    }
+    if (facts.dateReviewReason)
+      return { status: "review", reason: facts.dateReviewReason };
     const summary = this.summaries.summarize(category, located, facts);
     return {
       status: "published",
@@ -411,6 +417,7 @@ export class IncidentProcessor {
         ],
         occurredAt: null,
         occurredOn: facts.occurredOn,
+        eventDateEvidence: facts.eventDateEvidence,
         publishedAt: raw.publishedAt,
         status: facts.status,
         legalQualification: facts.article

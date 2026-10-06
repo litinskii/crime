@@ -2,13 +2,14 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, afterEach, describe, it, expect } from "vitest";
 import type { D1Database } from "@cloudflare/workers-types";
-import { D1IngestionStore } from "./store";
+import { D1IngestionStore, maintainPrivateData } from "./store";
 import { D1IncidentsRepository } from "./repository";
-import worker, { type Env } from "./index";
+import worker, { runScheduledTick, type Env } from "./index";
 import { policeSource } from "../../api/src/ingestion/collector";
 import { hash } from "../../api/src/ingestion/hash";
 import { ingest } from "../../api/src/ingestion/runner";
-import type { RawItem } from "../../api/src/ingestion/types";
+import type { RawItem, SourceDefinition } from "../../api/src/ingestion/types";
+import { IncidentProcessor } from "../../api/src/ingestion/processor";
 import { sourceById } from "../../api/src/ingestion/sources";
 
 // Execute the actual D1 SQL against SQLite, including transactional batch semantics.
@@ -19,6 +20,8 @@ class Statement {
     readonly text: string,
   ) {}
   bind(...values: SQLInputValue[]) {
+    if (values.length > 100)
+      throw new Error("D1 bound parameter limit exceeded");
     this.values = values;
     return this;
   }
@@ -334,10 +337,739 @@ describe("durable ingestion and public D1 API", () => {
       failed: 0,
     });
     expect(
+      sqlite.sqlite.prepare("SELECT content FROM raw_source_items").get()
+        ?.content,
+    ).not.toBe("[expired]");
+    await maintainPrivateData(sqlite.db);
+    expect(
       sqlite.sqlite.prepare("SELECT content,rules FROM raw_source_items").get(),
     ).toMatchObject({ content: "[expired]", rules: "expired" });
     expect((await repo.getIncidents(query)).items[0].sources[0].url).toBe(
       "https://t.me/UA_National_Police/1",
     );
+  });
+  it("polls thirteen sources fairly with their own cadence and ignores obsolete source rows", async () => {
+    const definitions: SourceDefinition[] = Array.from(
+      { length: 13 },
+      (_, i) => ({
+        ...policeSource,
+        id: `fixture-${String(i).padStart(2, "0")}`,
+        cadenceMinutes: i === 0 ? 30 : 60,
+      }),
+    );
+    sqlite.sqlite
+      .prepare(
+        "INSERT INTO sources(id,name,url,metadata) VALUES('obsolete','Old','https://example.test','{}')",
+      )
+      .run();
+    const anchor = Date.now(),
+      selected: string[] = [];
+    for (let minute = 0; minute < definitions.length; minute++) {
+      const tick = await runScheduledTick(
+        sqlite.db,
+        definitions,
+        (id) => ({
+          source: definitions.find((source) => source.id === id)!,
+          collect: async () => [],
+        }),
+        anchor + minute * 60000,
+      );
+      selected.push(tick!.source);
+      expect(tick!.runKind).toBe("poll");
+    }
+    expect(new Set(selected).size).toBe(13);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT next_attempt_at FROM sources WHERE id='fixture-00'")
+        .get()?.next_attempt_at,
+    ).toBe(anchor + 30 * 60000);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT next_attempt_at FROM sources WHERE id='fixture-01'")
+        .get()?.next_attempt_at,
+    ).toBe(anchor + 61 * 60000);
+    expect(
+      await runScheduledTick(
+        sqlite.db,
+        definitions,
+        () => {
+          throw new Error("Should not fetch");
+        },
+        anchor + 15 * 60000,
+      ),
+    ).toBeNull();
+  });
+  it("uses free minute slots to drain the queue without changing polling freshness or backoff", async () => {
+    const anchor = Date.now(),
+      records = await Promise.all(
+        Array.from({ length: 10 }, (_, i) =>
+          item(200 + i, "Поради поліції", `fixture ${i}`),
+        ),
+      );
+    let fetches = 0;
+    const factory = () => ({
+      source: policeSource,
+      collect: async () => {
+        fetches++;
+        return records;
+      },
+    });
+    expect(
+      (await runScheduledTick(sqlite.db, [policeSource], factory, anchor))
+        ?.runKind,
+    ).toBe("poll");
+    sqlite.sqlite
+      .prepare(
+        "UPDATE sources SET last_error='Source HTTP 403',consecutive_failures=2 WHERE id=?",
+      )
+      .run(policeSource.id);
+    const polling = sqlite.sqlite
+      .prepare(
+        "SELECT last_success_at,last_attempt_at,next_attempt_at,last_error,consecutive_failures FROM sources WHERE id=?",
+      )
+      .get(policeSource.id);
+    expect(
+      (
+        await runScheduledTick(
+          sqlite.db,
+          [policeSource],
+          factory,
+          anchor + 60000,
+        )
+      )?.runKind,
+    ).toBe("process");
+    expect(fetches).toBe(1);
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT last_success_at,last_attempt_at,next_attempt_at,last_error,consecutive_failures FROM sources WHERE id=?",
+        )
+        .get(policeSource.id),
+    ).toEqual(polling);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT last_processed_at FROM sources WHERE id=?")
+        .get(policeSource.id)?.last_processed_at,
+    ).toBe(new Date(anchor + 60000).toISOString());
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT COUNT(*) AS n FROM ingestion_runs WHERE run_kind='process'",
+        )
+        .get()?.n,
+    ).toBe(1);
+  });
+  it("stays within 50 SQL queries including scheduled selection for a full page and three publications", async () => {
+    const records = [
+      await item(101),
+      await item(102, "В Одесі сталася ДТП"),
+      await item(103, "У Луцьку викрили нарколабораторію"),
+      ...(await Promise.all(
+        Array.from({ length: 27 }, (_, i) =>
+          item(i + 104, "Нагадуємо про правила", `fixture ${i}`),
+        ),
+      )),
+    ];
+    sqlite.queries = 0;
+    const tick = await runScheduledTick(sqlite.db, [policeSource], () => ({
+      source: policeSource,
+      collect: async () => records,
+    }));
+    expect(tick?.result?.published).toBe(3);
+    expect(sqlite.queries).toBeLessThanOrEqual(50);
+  });
+  it("gives due polling priority over a backlog and respects a source lease", async () => {
+    const anchor = Date.now(),
+      other = sourceById("zaxid-news")!;
+    await runScheduledTick(
+      sqlite.db,
+      [policeSource],
+      () => ({
+        source: policeSource,
+        collect: async () =>
+          Promise.all(
+            Array.from({ length: 6 }, (_, i) =>
+              item(i + 300, "Поради", "fixture"),
+            ),
+          ),
+      }),
+      anchor,
+    );
+    const tick = await runScheduledTick(
+      sqlite.db,
+      [policeSource, other],
+      (id) => ({ source: sourceById(id)!, collect: async () => [] }),
+      anchor + 60000,
+    );
+    expect(tick).toMatchObject({ source: other.id, runKind: "poll" });
+    sqlite.sqlite
+      .prepare("UPDATE sources SET next_attempt_at=0,lease_until=? WHERE id=?")
+      .run(anchor + 10 * 60000, policeSource.id);
+    expect(
+      await runScheduledTick(
+        sqlite.db,
+        [policeSource],
+        () => {
+          throw new Error("Leased source must not fetch");
+        },
+        anchor + 2 * 60000,
+      ),
+    ).toBeNull();
+  });
+  it("supports an authenticated dedicated drain and records backfill without resetting polling", async () => {
+    const raw = await item(1);
+    await run([raw]);
+    const before = sqlite.sqlite
+      .prepare(
+        "SELECT last_attempt_at,last_success_at,next_attempt_at FROM sources WHERE id=?",
+      )
+      .get(policeSource.id);
+    await ingest(
+      {
+        source: policeSource,
+        collect: async () => [await item(2, "В Одесі сталася ДТП")],
+      },
+      new D1IngestionStore(sqlite.db, { runKind: "backfill" }),
+    );
+    const env: Env = {
+      DB: sqlite.db,
+      ASSETS: { fetch: async () => new Response() },
+      INGESTION_SECRET: "x".repeat(64),
+    };
+    expect(
+      (
+        await worker.fetch(
+          new Request("https://example.test/internal/process", {
+            method: "POST",
+          }),
+          env,
+        )
+      ).status,
+    ).toBe(401);
+    const response = await worker.fetch(
+      new Request("https://example.test/internal/process", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.INGESTION_SECRET}` },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ runKind: "process" });
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT last_attempt_at,last_success_at,next_attempt_at FROM sources WHERE id=?",
+        )
+        .get(policeSource.id),
+    ).toEqual(before);
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT COUNT(*) AS n FROM ingestion_runs WHERE run_kind='backfill'",
+        )
+        .get()?.n,
+    ).toBe(1);
+  });
+  it("preserves surviving provenance when one confirmation is edited or withdrawn, and during a processing error", async () => {
+    const first = await item(1),
+      second = {
+        ...first,
+        externalId: "UA_National_Police/2",
+        sourceUrl: "https://t.me/UA_National_Police/2",
+      };
+    await run([first, second]);
+    const rawId = sqlite.sqlite
+      .prepare("SELECT id FROM raw_source_items WHERE external_id=?")
+      .get(first.externalId)?.id as string;
+    await store.failItem(rawId, "processing-failed");
+    expect((await repo.getIncidents(query)).total).toBe(1);
+    await run([await item(1, "На Київщині викрили шахрайство")]);
+    const surviving = (await repo.getIncidents(query)).items[0];
+    expect(surviving.sources.map((source) => source.url)).toEqual([
+      second.sourceUrl,
+    ]);
+    await store.withdraw(policeSource.id, [second.externalId]);
+    expect((await repo.getIncidents(query)).total).toBe(0);
+  });
+  it("stores forwarding metadata privately and versions metadata-only corrections for reprocessing", async () => {
+    const raw = {
+      ...(await item(1)),
+      isRepost: true,
+      originalPublishedAt: "2026-09-30T09:00:00.000Z",
+    };
+    await run([raw]);
+    const firstSeen = sqlite.sqlite
+      .prepare("SELECT first_seen_at FROM raw_source_items")
+      .get()?.first_seen_at;
+    const changed = {
+      ...raw,
+      originalPublishedAt: "2026-09-29T09:00:00.000Z",
+      retrievedAt: new Date(Date.now() + 1000).toISOString(),
+    };
+    expect((await run([changed]))?.changed).toBe(1);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM raw_source_item_versions")
+        .get()?.n,
+    ).toBe(2);
+    expect(
+      sqlite.sqlite.prepare("SELECT first_seen_at FROM raw_source_items").get()
+        ?.first_seen_at,
+    ).toBe(firstSeen);
+    sqlite.sqlite.exec("UPDATE raw_source_items SET rules='obsolete'");
+    expect((await store.stage([], policeSource.id))[0]).toMatchObject({
+      isRepost: true,
+      originalPublishedAt: changed.originalPublishedAt,
+    });
+    expect(JSON.stringify(await repo.getIncidents(query))).not.toContain(
+      "originalPublishedAt",
+    );
+  });
+  it("keeps events on different dates separate and does not mix event-known and publication-only duplicate candidates", async () => {
+    const title = "У Києві чоловік викрав велосипед";
+    await run([
+      await item(
+        1,
+        title,
+        "30 вересня 2026 року у Києві чоловік викрав велосипед.",
+      ),
+    ]);
+    await run([
+      await item(
+        2,
+        title,
+        "29 вересня 2026 року у Києві чоловік викрав велосипед.",
+      ),
+    ]);
+    await run([
+      await item(
+        3,
+        title,
+        "У Києві чоловік викрав велосипед. Поліція встановлює обставини.",
+      ),
+    ]);
+    expect((await repo.getIncidents(query)).total).toBe(2);
+    expect(
+      (await repo.getIncidents({ ...query, from: "2026-09-01T00:00:00Z" }))
+        .total,
+    ).toBe(3);
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT COUNT(*) AS n FROM raw_source_items WHERE reason='possible-duplicate'",
+        )
+        .get()?.n,
+    ).toBe(0);
+  });
+  it("does not exact-merge identical relative-date posts anchored to different publication days", async () => {
+    const first = await item(
+      1,
+      "У Києві чоловік викрав велосипед",
+      "Учора у Києві чоловік викрав велосипед.",
+    );
+    await run([first]);
+    const nextDay = {
+      ...first,
+      externalId: "UA_National_Police/2",
+      sourceUrl: "https://t.me/UA_National_Police/2",
+      publishedAt: "2026-10-02T09:00:00.000Z",
+    };
+    expect((await run([nextDay]))?.published).toBe(1);
+    expect(
+      (
+        await repo.getIncidents({
+          ...query,
+          from: "2026-09-29T00:00:00Z",
+          dateBasis: "event",
+        })
+      ).total,
+    ).toBe(2);
+  });
+  it("retains other confirmations when the original changes after an exact fingerprint merge", async () => {
+    const first = await item(1),
+      second = {
+        ...first,
+        externalId: "UA_National_Police/2",
+        sourceUrl: "https://t.me/UA_National_Police/2",
+      };
+    await run([first, second]);
+    await run([
+      await item(
+        1,
+        undefined,
+        "У Києві поліцейські викрили шахрайство. Встановлюють обставини нового повідомлення.",
+      ),
+    ]);
+    expect(
+      (await repo.getIncidents(query)).items[0].sources
+        .map((source) => source.url)
+        .sort(),
+    ).toEqual([first.sourceUrl, second.sourceUrl].sort());
+    await run([await item(1, "На Київщині викрили шахрайство")]);
+    expect(
+      (await repo.getIncidents(query)).items[0].sources.map(
+        (source) => source.url,
+      ),
+    ).toEqual([second.sourceUrl]);
+  });
+  it("filters and paginates separately by publication date and proven event date", async () => {
+    const undated = await item(1);
+    const old = await item(
+      2,
+      "У Києві чоловік викрав велосипед",
+      "1 вересня 2026 року у Києві чоловік викрав велосипед.",
+    );
+    const recent = await item(
+      3,
+      "В Одесі сталася ДТП",
+      "30 вересня 2026 року в Одесі сталася ДТП.",
+    );
+    await run([undated, old, recent]);
+    const publication = { ...query, dateBasis: "publication" as const };
+    const first = await repo.getIncidents(publication);
+    expect(first.total).toBe(3);
+    const second = await repo.getIncidents({
+      ...publication,
+      cursor: first.nextCursor!,
+    });
+    const third = await repo.getIncidents({
+      ...publication,
+      cursor: second.nextCursor!,
+    });
+    expect(
+      new Set([first.items[0].id, second.items[0].id, third.items[0].id]).size,
+    ).toBe(3);
+    const event = {
+      ...query,
+      from: "2026-09-01T00:00:00Z",
+      dateBasis: "event" as const,
+    };
+    const events = await repo.getIncidents(event);
+    expect(events.total).toBe(2);
+    expect(events.items[0].occurredOn).toBe("2026-09-30");
+    expect(
+      (await repo.getIncidents({ ...event, cursor: events.nextCursor! }))
+        .items[0].occurredOn,
+    ).toBe("2026-09-01");
+    expect(
+      (await repo.getIncidents({ ...query, dateBasis: "event" })).total,
+    ).toBe(1);
+  });
+  it("preserves independently proven event dates and the latest publication while confirmations arrive out of order", async () => {
+    const canonicalUrl = "https://example.test/shared-report",
+      title = "У Києві чоловік викрав велосипед";
+    const first = {
+      ...(await item(
+        1,
+        title,
+        "30 вересня 2026 року у Києві чоловік викрав велосипед.",
+      )),
+      canonicalUrl,
+      publishedAt: "2026-10-03T09:00:00.000Z",
+    };
+    const second = {
+      ...(await item(
+        2,
+        title,
+        "У Києві чоловік викрав велосипед. Поліція встановлює обставини.",
+      )),
+      canonicalUrl,
+      publishedAt: "2026-10-01T09:00:00.000Z",
+    };
+    const third = {
+      ...(await item(
+        3,
+        title,
+        "30 вересня 2026 року у Києві чоловік викрав велосипед. Поліція розслідує подію.",
+      )),
+      canonicalUrl,
+      publishedAt: "2026-10-02T09:00:00.000Z",
+    };
+    await run([first]);
+    await run([second]);
+    let incident = (await repo.getIncidents(query)).items[0];
+    expect(incident).toMatchObject({
+      occurredOn: "2026-09-30",
+      publishedAt: first.publishedAt,
+      eventDateEvidence: { sourceUrl: first.sourceUrl },
+    });
+    await run([third]);
+    await run([
+      { ...first, content: second.content, contentHash: second.contentHash },
+    ]);
+    incident = (await repo.getIncidents(query)).items[0];
+    expect(incident).toMatchObject({
+      occurredOn: "2026-09-30",
+      publishedAt: first.publishedAt,
+      eventDateEvidence: { sourceUrl: third.sourceUrl },
+    });
+    await store.withdraw(policeSource.id, [third.externalId]);
+    incident = (await repo.getIncidents(query)).items[0];
+    expect(incident.occurredOn).toBeUndefined();
+    expect(incident.eventDateEvidence).toBeUndefined();
+    expect(incident.publishedAt).toBe(first.publishedAt);
+    expect(
+      (await repo.getIncidents({ ...query, dateBasis: "event" })).total,
+    ).toBe(0);
+    await store.withdraw(policeSource.id, [first.externalId]);
+    incident = (await repo.getIncidents(query)).items[0];
+    expect(incident.publishedAt).toBe(second.publishedAt);
+    expect(incident.sources.map((source) => source.url)).toEqual([
+      second.sourceUrl,
+    ]);
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT event_date,publication_date FROM incidents WHERE is_published=1",
+        )
+        .get(),
+    ).toMatchObject({
+      event_date: null,
+      publication_date: Date.parse(second.publishedAt),
+    });
+  });
+  it("includes an event with unknown time on the matching Kyiv calendar day near a UTC boundary", async () => {
+    const raw = {
+      ...(await item(
+        1,
+        "У Києві чоловік викрав велосипед",
+        "6 жовтня 2026 року у Києві чоловік викрав велосипед.",
+      )),
+      publishedAt: "2026-10-06T19:00:00.000Z",
+    };
+    await run([raw]);
+    const event = {
+      ...query,
+      dateBasis: "event" as const,
+      from: "2026-10-05T22:00:00Z",
+      to: "2026-10-05T23:00:00Z",
+    };
+    expect((await repo.getIncidents(event)).items[0].occurredOn).toBe(
+      "2026-10-06",
+    );
+    expect((await repo.getStatistics(event)).total).toBe(1);
+    expect(
+      (await repo.getIncidents({ ...event, dateBasis: "publication" })).total,
+    ).toBe(0);
+  });
+  it("bounds a maximum confirmed registry withdrawal plus three new court publications", async () => {
+    const source = sourceById("court-decisions")!;
+    const store = new D1IngestionStore(sqlite.db, { runKind: "backfill" });
+    const records = await Promise.all(
+      ["Тернополі", "Києві", "Луцьку"].map(async (city, i) => {
+        const content = `Справа №123/${i}/26\nВСТАНОВИВ:\n01.09.2026 у м. ${city} викрав велосипед.`;
+        return {
+          ...(await item(i + 101)),
+          sourceId: source.id,
+          externalId: String(i + 101),
+          sourceUrl: `https://reyestr.court.gov.ua/Review/${i + 101}`,
+          title: "Вирок: Крадіжка",
+          content,
+          contentHash: await hash(content),
+        };
+      }),
+    );
+    sqlite.queries = 0;
+    const result = await ingest(
+      {
+        source,
+        collect: async () => {
+          await store.withdraw(
+            source.id,
+            Array.from({ length: 100 }, (_, i) => String(i + 1)),
+          );
+          return records;
+        },
+      },
+      store,
+    );
+    expect(result?.published).toBe(3);
+    expect(sqlite.queries).toBeLessThanOrEqual(50);
+  });
+  it("reports source diagnostics without mistaking repeated retrieval for new discovery", async () => {
+    const records = await Promise.all(
+      Array.from({ length: 6 }, (_, i) => item(i + 400, "Поради", "fixture")),
+    );
+    await run(records);
+    const env: Env = {
+      DB: sqlite.db,
+      ASSETS: { fetch: async () => new Response() },
+    };
+    const readStatus = async () =>
+      (await (
+        await worker.fetch(
+          new Request("https://example.test/api/v1/status"),
+          env,
+        )
+      ).json()) as { sources: Array<Record<string, unknown>> };
+    const first = (await readStatus()).sources.find(
+      (source) => source.id === policeSource.id,
+    )!;
+    expect(first).toMatchObject({
+      pending: 3,
+      latestPublicationAt: records[0].publishedAt,
+      lastNewItemAt: records.at(-1)!.retrievedAt,
+      counts: { collected: 3, rejected: 3 },
+    });
+    expect(first.oldestPendingAt).toBeTruthy();
+    await run(
+      records.map((raw) => ({
+        ...raw,
+        retrievedAt: new Date(Date.now() + 1000).toISOString(),
+      })),
+    );
+    const second = (await readStatus()).sources.find(
+      (source) => source.id === policeSource.id,
+    )!;
+    expect(second.lastNewItemAt).toBe(first.lastNewItemAt);
+    expect(second).toMatchObject({
+      pending: 0,
+      oldestPendingAt: null,
+      counts: { rejected: 6 },
+      rejectionReasons: { "not-single-supported-incident": 6 },
+    });
+  });
+  it("validates the drain flag and allows only registered sources without fetching", async () => {
+    const env: Env = {
+      DB: sqlite.db,
+      ASSETS: { fetch: async () => new Response() },
+      INGESTION_SECRET: "x".repeat(64),
+    };
+    const drain = (query: string) =>
+      worker.fetch(
+        new Request(`https://example.test/internal/ingest?${query}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${env.INGESTION_SECRET}` },
+        }),
+        env,
+      );
+    expect((await drain("source=court-decisions&drain=1")).status).toBe(200);
+    expect((await drain("source=https://example.test&drain=1")).status).toBe(
+      400,
+    );
+    for (const query of [
+      "drain=true",
+      "drain=0",
+      "drain=",
+      "drain=1&before=123",
+      "drain=1&page=1",
+      "drain=1&runKind=poll",
+    ])
+      expect((await drain(query)).status).toBe(400);
+  });
+  it("applies the fresh-source migration to existing dates and version history", async () => {
+    const legacy = new DatabaseSync(":memory:"),
+      dir = new URL("../migrations/", import.meta.url);
+    try {
+      for (const file of [
+        "0001_data.sql",
+        "0002_retention_indexes.sql",
+        "0003_source_retries.sql",
+      ])
+        legacy.exec(readFileSync(new URL(file, dir), "utf8"));
+      const processed = await new IncidentProcessor().process(await item(1));
+      expect(processed.status).toBe("published");
+      if (processed.status !== "published")
+        throw new Error("Fixture failed processing");
+      for (const [id, occurredAt, occurredOn] of [
+        ["date", null, "2026-09-30"],
+        ["time", "2026-10-01T12:34:56.789Z", undefined],
+        ["unknown", null, undefined],
+      ] as const) {
+        const incident = {
+          ...processed.incident,
+          id,
+          occurredAt,
+          occurredOn,
+          publishedAt: "2026-10-01T09:00:00.123Z",
+        };
+        legacy
+          .prepare(
+            "INSERT INTO incidents(id,category,latitude,longitude,effective_date,published_at,city,public_data,search_text,canonical_key,fingerprint,is_published) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)",
+          )
+          .run(
+            id,
+            incident.category,
+            incident.location.latitude,
+            incident.location.longitude,
+            Date.parse(incident.publishedAt),
+            incident.publishedAt,
+            incident.location.city!,
+            JSON.stringify(incident),
+            "",
+            id,
+            id,
+          );
+      }
+      legacy
+        .prepare("INSERT INTO sources(id,name,url,metadata) VALUES(?,?,?,'{}')")
+        .run(policeSource.id, policeSource.name, policeSource.url);
+      legacy
+        .prepare(
+          "INSERT INTO raw_source_items(id,source_id,external_id,source_url,title,content,published_at,retrieved_at,content_hash,rules,status) VALUES('raw',?,'1','https://example.test','Old title','Old text','2026-10-01','2026-10-02','hash','old','rejected')",
+        )
+        .run(policeSource.id);
+      legacy.exec(
+        "INSERT INTO raw_source_item_versions(raw_id,content_hash,title,content,published_at,retrieved_at) VALUES('raw','hash','Old title','Old text','2026-10-01','2026-10-02'); INSERT INTO incident_sources(incident_id,raw_id,source_url) VALUES('date','raw','https://example.test')",
+      );
+      legacy.exec(readFileSync(new URL("0004_fresh_sources.sql", dir), "utf8"));
+      expect(
+        legacy
+          .prepare(
+            "SELECT event_date,publication_date FROM incidents WHERE id='date'",
+          )
+          .get(),
+      ).toMatchObject({
+        event_date: Date.parse("2026-09-30T00:00:00Z"),
+        publication_date: Date.parse("2026-10-01T09:00:00.123Z"),
+      });
+      expect(
+        legacy.prepare("SELECT event_date FROM incidents WHERE id='time'").get()
+          ?.event_date,
+      ).toBe(Date.parse("2026-10-01T12:34:56.789Z"));
+      expect(
+        legacy
+          .prepare("SELECT event_date FROM incidents WHERE id='unknown'")
+          .get()?.event_date,
+      ).toBeNull();
+      expect(
+        legacy.prepare("SELECT active FROM incident_sources").get()?.active,
+      ).toBe(0);
+      expect(
+        legacy.prepare("SELECT first_seen_at FROM raw_source_items").get()
+          ?.first_seen_at,
+      ).toBe("2026-10-02");
+      expect(
+        legacy
+          .prepare(
+            "SELECT content_hash,content,metadata FROM raw_source_item_versions",
+          )
+          .get(),
+      ).toMatchObject({
+        content_hash: "hash",
+        content: "Old text",
+        metadata: "{}",
+      });
+    } finally {
+      legacy.close();
+    }
+  });
+  it("bounds each maintenance table to 500 rows and keeps public evidence", async () => {
+    await run([await item(1)]);
+    const insert = sqlite.sqlite.prepare(
+      "INSERT INTO processing_jobs(id,raw_id,stage,status,created_at) SELECT ?,id,'fixture','rejected','2020-01-01' FROM raw_source_items LIMIT 1",
+    );
+    for (let i = 0; i < 501; i++) insert.run(`old-${i}`);
+    sqlite.queries = 0;
+    await maintainPrivateData(sqlite.db);
+    expect(sqlite.queries).toBe(4);
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT COUNT(*) AS n FROM processing_jobs WHERE created_at='2020-01-01'",
+        )
+        .get()?.n,
+    ).toBe(1);
+    expect((await repo.getIncidents(query)).total).toBe(1);
   });
 });

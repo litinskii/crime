@@ -15,13 +15,13 @@ const source = process.argv
 if (source) url.searchParams.set("source", source);
 const drain = process.argv.includes("--drain");
 if (drain) {
-  if (!["zaxid-news", "ukrinform-regions"].includes(source))
-    throw new Error("Drain requires a registered article source");
-  url.pathname = "/internal/articles";
-  url.search = "";
+  if (!source) throw new Error("Drain requires a source ID");
+  url.pathname = "/internal/process";
+  if (before) throw new Error("Drain cannot backfill a page");
 }
 const page = process.argv.find((arg) => arg.startsWith("--page="))?.slice(7);
 if (page) url.searchParams.set("page", page);
+if (drain && page) throw new Error("Drain cannot backfill a page");
 if (before) {
   if (!/^[1-9][0-9]*$/.test(before)) throw new Error("Invalid cursor");
   url.searchParams.set("before", before);
@@ -50,7 +50,6 @@ for (let i = 0; i < Math.max(pages, runs); i++) {
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: drain ? JSON.stringify({ source, urls: [] }) : undefined,
     signal: AbortSignal.timeout(60000),
   });
   const body = await response.json().catch(() => {

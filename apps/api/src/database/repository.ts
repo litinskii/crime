@@ -3,18 +3,39 @@ import {
   categories,
   decodeCursor,
   encodeCursor,
+  queryDateBounds,
+  previousDateBounds,
   type Incident,
   type IncidentQuery,
   type IncidentResponse,
   type IncidentsRepository,
   type IncidentStatistics,
 } from "@crime-radar/shared";
-export function where(q: IncidentQuery, mode: "real" | "demo" = "real") {
-  const values: unknown[] = [q.west, q.south, q.east, q.north, q.from, q.to];
+export function where(
+  q: IncidentQuery,
+  mode: "real" | "demo" = "real",
+  range = queryDateBounds(q),
+) {
+  const values: unknown[] = [
+    q.west,
+    q.south,
+    q.east,
+    q.north,
+    new Date(range.from).toISOString(),
+    new Date(range.to).toISOString(),
+  ];
+  const dateFilter =
+    q.dateBasis === "event"
+      ? "((public_data->>'occurredAt' IS NOT NULL AND occurred_at >= $5::timestamptz AND occurred_at <= $6::timestamptz) OR (public_data->>'occurredAt' IS NULL AND occurred_at >= $7::timestamptz AND occurred_at <= $8::timestamptz))"
+      : `${dateColumn(q)} >= $5::timestamptz AND ${dateColumn(q)} <= $6::timestamptz`;
+  if (q.dateBasis === "event")
+    values.push(
+      new Date(range.dayFrom).toISOString(),
+      new Date(range.dayTo).toISOString(),
+    );
   const clauses = [
     "public_location && ST_MakeEnvelope($1,$2,$3,$4,4326)",
-    "COALESCE(occurred_at,reported_at,published_at) >= $5::timestamptz",
-    "COALESCE(occurred_at,reported_at,published_at) <= $6::timestamptz",
+    dateFilter,
     "is_published = true",
     mode === "demo"
       ? "public_data->>'synthetic'='true'"
@@ -37,6 +58,13 @@ export function where(q: IncidentQuery, mode: "real" | "demo" = "real") {
   }
   return { text: clauses.join(" AND "), values };
 }
+function dateColumn(q: IncidentQuery) {
+  return q.dateBasis === "event"
+    ? "occurred_at"
+    : q.dateBasis === "publication"
+      ? "published_at"
+      : "COALESCE(occurred_at,reported_at,published_at)";
+}
 export class PostgresIncidentsRepository implements IncidentsRepository {
   constructor(
     readonly pool: Pool,
@@ -49,13 +77,15 @@ export class PostgresIncidentsRepository implements IncidentsRepository {
     let after = "";
     if (q.cursor) {
       const cursor = decodeCursor(q.cursor);
+      if (cursor.dateBasis !== q.dateBasis)
+        throw new Error("Cursor date basis does not match query");
       pageValues.push(cursor.date, cursor.id);
       const dateIndex = pageValues.length - 1;
-      after = ` AND (COALESCE(occurred_at,reported_at,published_at) < $${dateIndex}::timestamptz OR (COALESCE(occurred_at,reported_at,published_at) = $${dateIndex}::timestamptz AND id > $${dateIndex + 1}))`;
+      after = ` AND (${dateColumn(q)} < $${dateIndex}::timestamptz OR (${dateColumn(q)} = $${dateIndex}::timestamptz AND id > $${dateIndex + 1}))`;
     }
     pageValues.push(limit + 1);
     const result = await this.pool.query<{ public_data: Incident }>(
-      `SELECT public_data FROM incidents WHERE ${w.text}${after} ORDER BY COALESCE(occurred_at,reported_at,published_at) DESC,id ASC LIMIT $${pageValues.length}`,
+      `SELECT public_data FROM incidents WHERE ${w.text}${after} ORDER BY ${dateColumn(q)} DESC,id ASC LIMIT $${pageValues.length}`,
       pageValues,
     );
     const count = await this.pool.query<{ total: string }>(
@@ -68,7 +98,9 @@ export class PostgresIncidentsRepository implements IncidentsRepository {
       items,
       total,
       nextCursor:
-        result.rows.length > limit ? encodeCursor(items.at(-1)!) : null,
+        result.rows.length > limit
+          ? encodeCursor(items.at(-1)!, q.dateBasis)
+          : null,
     };
   }
   async getIncident(id: string): Promise<Incident> {
@@ -93,15 +125,7 @@ export class PostgresIncidentsRepository implements IncidentsRepository {
       number
     >;
     counts.rows.forEach((r) => (result[r.category] = Number(r.total)));
-    const duration = Date.parse(q.to) - Date.parse(q.from);
-    const p = where(
-      {
-        ...q,
-        from: new Date(Date.parse(q.from) - duration - 1).toISOString(),
-        to: new Date(Date.parse(q.from) - 1).toISOString(),
-      },
-      this.mode,
-    );
+    const p = where(q, this.mode, previousDateBounds(q));
     const previous = await this.pool.query<{ total: string }>(
       `SELECT COUNT(*) AS total FROM incidents WHERE ${p.text}`,
       p.values,

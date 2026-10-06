@@ -3,21 +3,27 @@ import {
   categories,
   decodeCursor,
   encodeCursor,
+  queryDateBounds,
+  previousDateBounds,
   type Incident,
   type IncidentQuery,
   type IncidentsRepository,
 } from "@crime-radar/shared";
-function where(q: IncidentQuery) {
+function where(q: IncidentQuery, range = queryDateBounds(q)) {
   const values: (string | number)[] = [
     q.south,
     q.north,
     q.west,
     q.east,
-    Date.parse(q.from),
-    Date.parse(q.to),
+    range.from,
+    range.to,
   ];
-  let sql =
-    "is_published=1 AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? AND effective_date BETWEEN ? AND ?";
+  const dateFilter =
+    q.dateBasis === "event"
+      ? "((json_extract(public_data,'$.occurredAt') IS NOT NULL AND event_date BETWEEN ? AND ?) OR (json_extract(public_data,'$.occurredAt') IS NULL AND event_date BETWEEN ? AND ?))"
+      : `${dateColumn(q)} BETWEEN ? AND ?`;
+  if (q.dateBasis === "event") values.push(range.dayFrom, range.dayTo);
+  let sql = `is_published=1 AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? AND ${dateFilter}`;
   if (q.categories?.length) {
     sql += ` AND category IN (${q.categories.map(() => "?").join(",")})`;
     values.push(...q.categories);
@@ -32,6 +38,13 @@ function where(q: IncidentQuery) {
   }
   return { sql, values };
 }
+function dateColumn(q: IncidentQuery) {
+  return q.dateBasis === "event"
+    ? "event_date"
+    : q.dateBasis === "publication"
+      ? "publication_date"
+      : "effective_date";
+}
 export class D1IncidentsRepository implements IncidentsRepository {
   constructor(readonly db: D1Database) {}
   async getIncidents(q: IncidentQuery) {
@@ -41,13 +54,15 @@ export class D1IncidentsRepository implements IncidentsRepository {
     let after = "";
     if (q.cursor) {
       const cursor = decodeCursor(q.cursor);
-      after = " AND (effective_date<? OR (effective_date=? AND id>?))";
+      if (cursor.dateBasis !== q.dateBasis)
+        throw new Error("Cursor date basis does not match query");
+      after = ` AND (${dateColumn(q)}<? OR (${dateColumn(q)}=? AND id>?))`;
       values.push(Date.parse(cursor.date), Date.parse(cursor.date), cursor.id);
     }
     const [rows, total] = await this.db.batch([
       this.db
         .prepare(
-          `SELECT public_data FROM incidents WHERE ${filter.sql}${after} ORDER BY effective_date DESC,id ASC LIMIT ?`,
+          `SELECT public_data FROM incidents WHERE ${filter.sql}${after} ORDER BY ${dateColumn(q)} DESC,id ASC LIMIT ?`,
         )
         .bind(...values, limit + 1),
       this.db
@@ -61,7 +76,8 @@ export class D1IncidentsRepository implements IncidentsRepository {
     return {
       items,
       total: Number((total.results[0] as { total: number }).total),
-      nextCursor: data.length > limit ? encodeCursor(items.at(-1)!) : null,
+      nextCursor:
+        data.length > limit ? encodeCursor(items.at(-1)!, q.dateBasis) : null,
     };
   }
   async getIncident(id: string) {
@@ -75,13 +91,8 @@ export class D1IncidentsRepository implements IncidentsRepository {
     return JSON.parse(row.public_data) as Incident;
   }
   async getStatistics(q: IncidentQuery) {
-    const filter = where(q),
-      duration = Date.parse(q.to) - Date.parse(q.from);
-    const previous = where({
-      ...q,
-      from: new Date(Date.parse(q.from) - duration - 1).toISOString(),
-      to: new Date(Date.parse(q.from) - 1).toISOString(),
-    });
+    const filter = where(q);
+    const previous = where(q, previousDateBounds(q));
     const [rows, prior] = await this.db.batch([
       this.db
         .prepare(

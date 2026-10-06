@@ -10,6 +10,10 @@ export interface RawItem {
   retrievedAt: string;
   contentHash: string;
   canonicalUrl?: string;
+  /** Telegram's forwarding header, not merely a link to another article. */
+  isRepost?: boolean;
+  /** Only supplied when the source proves the original publication timestamp. */
+  originalPublishedAt?: string;
 }
 export interface SourceDefinition {
   id: string;
@@ -19,6 +23,12 @@ export interface SourceDefinition {
   kind?: "official" | "media" | "court";
   transport?: "telegram" | "rss" | "police-web" | "court";
   archiveUrl?: string;
+  telegramChannel?: string;
+  /** GeoNames admin1 code; source coverage is not an incident location. */
+  regionCode?: string;
+  /** Exact hosts allowed for canonical article provenance; links are not fetched. */
+  canonicalHosts?: readonly string[];
+  cadenceMinutes?: number;
 }
 export interface SourceCollector {
   source: SourceDefinition;
@@ -56,6 +66,8 @@ export interface ExtractedFacts {
   article?: string;
   status?: Incident["status"];
   occurredOn?: string;
+  eventDateEvidence?: import("./event-date").EventDateEvidence;
+  dateReviewReason?: string;
   details: { uk: string; en: string }[];
 }
 export type Processed =

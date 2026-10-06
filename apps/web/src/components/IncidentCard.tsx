@@ -69,6 +69,19 @@ export function IncidentCard({
       <div className="date-info">
         <IncidentDate incident={incident} />
       </div>
+      {incident.eventDateEvidence &&
+        incident.eventDateEvidence.kind !== "explicit" && (
+          <p className="small subtle">{t("eventDateInferred")}</p>
+        )}
+      {(incident.occurredAt || incident.occurredOn) && incident.publishedAt && (
+        <p className="small subtle">
+          {t("publishedOn", {
+            date: format(new Date(incident.publishedAt), "d MMM yyyy · HH:mm", {
+              locale: locale === "uk" ? uk : enGB,
+            }),
+          })}
+        </p>
+      )}
       <div className="location-info">
         <MapPin size={17} />
         <span>

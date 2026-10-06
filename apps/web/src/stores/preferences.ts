@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { IncidentCategory, Bounds } from "@crime-radar/shared";
+import type { IncidentCategory, Bounds, DateBasis } from "@crime-radar/shared";
 export type Period = "24h" | "7d" | "30d" | "1y" | "custom";
 export type Theme = "system" | "light" | "dark";
 export const initialBounds: Bounds = {
@@ -11,6 +11,7 @@ export const initialBounds: Bounds = {
 };
 interface Preferences {
   period: Period;
+  dateBasis: DateBasis;
   categories: IncidentCategory[];
   keyword: string;
   customFrom: string;
@@ -23,6 +24,7 @@ export const usePreferences = create<Preferences>()(
   persist(
     (set) => ({
       period: "7d",
+      dateBasis: "event",
       categories: [],
       keyword: "",
       customFrom: "",

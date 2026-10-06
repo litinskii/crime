@@ -41,7 +41,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostGIS integration", () => {
         27,
       );
       const privateTables = await pool.query(
-        "SELECT count(*) FROM information_schema.tables WHERE table_name='incident_private_locations'",
+        "SELECT count(*) FROM information_schema.tables WHERE table_name='incident_private_locations' AND table_schema=current_schema()",
       );
       expect(Number(privateTables.rows[0].count)).toBe(1);
     } finally {

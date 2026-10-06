@@ -34,7 +34,7 @@ The production frontend is **apps/web/dist/**. Its service worker is generated d
 
 - Full-screen MapLibre map centered on Ukraine, touch pan/zoom, category pictograms and clustering.
 - Cluster tap zooms in; incident selection opens a sheet with collapsed, half and expanded states. A keyboard/screen-reader incident list is also available.
-- Category multi-select, keyword/legal-article search, 24h/7d/30d/1y and custom periods. Selected filters persist for the session.
+- Category multi-select, keyword/legal-article search, 24h/7d/30d/1y and custom Ukrainian-calendar periods, with an explicit event/publication date basis. Selected filters persist for the session.
 - Density mode and complete statistics for visible bounds, with a previous-period comparison where a nonzero baseline exists.
 - City search through a replaceable geocoding interface supports eleven Ukrainian cities. A normalized address geocoder can be connected separately.
 - Explicit geolocation button; no permission request on launch, no precise user-location persistence.
@@ -122,6 +122,6 @@ Build, typecheck and lint commands are supplied. Unit/API tests cover bilingual 
 
 Lighthouse >90 Performance/Accessibility/Best Practices are product targets; they are not asserted without a measured deployment audit. Real geolocation permission, OS home-screen installation, Web Share and provider coverage should also be validated on physical target devices before release.
 
-The real-data pipeline includes police/RSS/full-article collectors, official court RTF processing, private versioned originals, durable bounded queues, expanded settlement lookup, safe bilingual facts, provenance and exact deduplication. Uncertain places and possible fuzzy duplicates stay unpublished for review. A due web source is selected every ten minutes, with persistent outage backoff. Court open data is harvested daily by GitHub Actions using short-lived OIDC authentication. Public `/api/v1/status` and Settings report source coverage, retries and check times.
+The real-data pipeline includes police/RSS/full-article collectors, official court RTF processing, private versioned originals, durable bounded queues, expanded settlement lookup, safe bilingual facts, provenance and exact deduplication. Uncertain places and possible fuzzy duplicates stay unpublished for review. Every hour a due web source is polled or one queued source is processed, with independent clocks and persistent outage backoff. Five verified regional police Telegram channels form the first fresh-data pilot. Established event dates and source publication dates are filtered separately; corrections retain independent supporting originals. Court open data is harvested daily by GitHub Actions using short-lived OIDC authentication. Public `/api/v1/status` and Settings report source coverage, retries and check times.
 
 Tests execute D1 SQL in SQLite and cover privacy gates, edits/retraction, leases, retries, retention, pagination/statistics and the Free-plan query budget. They use fictional fixtures without external requests. The optional PostGIS test validates the other adapter. More regional sources, better ambiguous-place extraction, richer summaries and an authenticated review/correction UI remain quality work. See [docs/data-platform.md](docs/data-platform.md).

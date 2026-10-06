@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseFeed, parseArticle, allowedArticle } from "./web-collector";
-import { sourceById } from "./sources";
+import { scheduledSources, sourceById, sources } from "./sources";
 import { rtfToText, validCourtDocument } from "./court";
 import { IncidentProcessor, courtEvent, extractPlace } from "./processor";
 import { hash } from "./hash";
@@ -22,6 +22,33 @@ async function raw(
   };
 }
 describe("public-source adapters", () => {
+  it("schedules only verified regional Telegram sources with bounded cadence", () => {
+    const regions = sources.filter(
+      (source) => source.transport === "telegram" && source.regionCode,
+    );
+    expect(regions.map((source) => source.telegramChannel)).toEqual([
+      "vinnpol",
+      "NPU_Rivne",
+      "policevolyn",
+      "police_bukovina",
+      "zt_police",
+    ]);
+    expect(new Set(sources.map((source) => source.id)).size).toBe(
+      sources.length,
+    );
+    for (const source of regions) {
+      expect(source.url).toBe(`https://t.me/s/${source.telegramChannel}`);
+      expect(
+        new URL(source.verificationUrl).hostname.endsWith("npu.gov.ua"),
+      ).toBe(true);
+      expect(source.cadenceMinutes).toBeGreaterThanOrEqual(60);
+      expect(source.cadenceMinutes).toBeLessThanOrEqual(60);
+      expect(source.canonicalHosts).toHaveLength(1);
+      expect(scheduledSources).toContain(source);
+    }
+    expect(sourceById("npu-rivne-telegram")?.regionCode).toBe("19");
+    expect(sourceById("npu-telegram")?.cadenceMinutes).toBe(60);
+  });
   it("reads namespace dates and full RSS text; refuses external or arbitrary URLs", async () => {
     const s = sourceById("zaxid-news")!;
     const [r] = await parseFeed(
@@ -172,6 +199,6 @@ describe("event geography and provenance", () => {
     expect(result.incident.occurredAt).toBeNull();
     expect(result.incident.location.city).toBe("Тернопіль");
     expect(result.incident.status).toBe("court");
-    expect(result.canonicalKey).toBe("court-case:123/456/26");
+    expect(result.canonicalKey).toBe("court-document:123");
   });
 });

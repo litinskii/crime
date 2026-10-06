@@ -12,6 +12,14 @@ export const categories = [
 export type IncidentCategory = (typeof categories)[number];
 export type Locale = "uk" | "en";
 export type LocalizedText = { uk: string; en: string };
+export type DateBasis = "event" | "publication";
+export interface EventDateEvidence {
+  kind: "explicit" | "relative" | "inferred-year";
+  text: string;
+  sourceUrl: string;
+  anchorPublishedAt?: string;
+  timeZone: "Europe/Kyiv";
+}
 export interface IncidentSource {
   name: string;
   kind?: "official" | "media" | "court";
@@ -25,8 +33,9 @@ export interface Incident {
   category: IncidentCategory;
   keywords: string[];
   occurredAt: string | null;
-  /** An explicitly extracted event date when the event's time is unknown. */
+  /** An extracted event date when the event's time is unknown. */
   occurredOn?: string;
+  eventDateEvidence?: EventDateEvidence;
   reportedAt?: string;
   publishedAt?: string;
   location: {
@@ -54,6 +63,8 @@ export interface Bounds {
 export interface IncidentQuery extends Bounds {
   from: string;
   to: string;
+  /** Omitted for legacy effective-date queries. The UI always chooses a basis. */
+  dateBasis?: DateBasis;
   categories?: IncidentCategory[];
   query?: string;
   limit?: number;
@@ -222,6 +233,7 @@ export function createMockIncidents(now = new Date()): Incident[] {
       description: template.description,
       keywords: template.keywords,
       occurredAt,
+      publishedAt: occurredAt,
       reportedAt: occurredAt,
       location: {
         latitude: city.lat + Math.sin(i * 2.71) * 0.045,
@@ -240,7 +252,16 @@ export function createMockIncidents(now = new Date()): Incident[] {
     };
   });
 }
-export function incidentDate(item: Incident): string | undefined {
+export function incidentDate(
+  item: Incident,
+  basis?: DateBasis,
+): string | undefined {
+  if (basis === "publication") return item.publishedAt;
+  if (basis === "event")
+    return (
+      item.occurredAt ??
+      (item.occurredOn ? `${item.occurredOn}T00:00:00.000Z` : undefined)
+    );
   return (
     item.occurredAt ??
     (item.occurredOn ? `${item.occurredOn}T00:00:00.000Z` : undefined) ??
@@ -248,16 +269,93 @@ export function incidentDate(item: Incident): string | undefined {
     item.publishedAt
   );
 }
+const calendarFormatter = new Intl.DateTimeFormat("en", {
+  timeZone: "Europe/Kyiv",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const offsetFormatter = new Intl.DateTimeFormat("en", {
+  timeZone: "Europe/Kyiv",
+  timeZoneName: "shortOffset",
+});
+/** Date-only event keys are calendar dates, never assertions of midnight. */
+export function queryDateBounds(q: Pick<IncidentQuery, "from" | "to">) {
+  const calendarKey = (value: string) => {
+    const parts = calendarFormatter.formatToParts(new Date(value));
+    const part = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((p) => p.type === type)!.value;
+    return Date.parse(
+      `${part("year")}-${part("month")}-${part("day")}T00:00:00Z`,
+    );
+  };
+  return {
+    from: Date.parse(q.from),
+    to: Date.parse(q.to),
+    dayFrom: calendarKey(q.from),
+    dayTo: calendarKey(q.to),
+  };
+}
+/** Start of a Ukrainian calendar day, including its actual DST offset. */
+export function kyivDayStart(day: string): number {
+  const midnight = Date.parse(`${day}T00:00:00Z`);
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(day) ||
+    !Number.isFinite(midnight) ||
+    new Date(midnight).toISOString().slice(0, 10) !== day
+  )
+    throw new Error("Invalid calendar date");
+  let timestamp = midnight;
+  for (let i = 0; i < 3; i++) {
+    const name = offsetFormatter
+      .formatToParts(new Date(timestamp))
+      .find((p) => p.type === "timeZoneName")!.value;
+    const match = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/.exec(name);
+    if (!match) throw new Error("Unsupported Kyiv timezone offset");
+    const offset =
+      (Number(match[2]) * 60 + Number(match[3] ?? 0)) *
+      60000 *
+      (match[1] === "+" ? 1 : -1);
+    const next = midnight - offset;
+    if (next === timestamp) break;
+    timestamp = next;
+  }
+  return timestamp;
+}
+export function kyivCalendarRange(from: string, to: string) {
+  kyivDayStart(to);
+  const nextDay = new Date(Date.parse(`${to}T00:00:00Z`) + 86400000)
+    .toISOString()
+    .slice(0, 10);
+  return {
+    from: new Date(kyivDayStart(from)).toISOString(),
+    to: new Date(kyivDayStart(nextDay) - 1).toISOString(),
+  };
+}
+/** Compare exact times over the previous duration and date-only events over
+ * the preceding, non-overlapping set of Ukrainian calendar days. */
+export function previousDateBounds(q: Pick<IncidentQuery, "from" | "to">) {
+  const current = queryDateBounds(q);
+  const duration = current.to - current.from + 1;
+  const days = current.dayTo - current.dayFrom + 86400000;
+  return {
+    from: current.from - duration,
+    to: current.from - 1,
+    dayFrom: current.dayFrom - days,
+    dayTo: current.dayFrom - 86400000,
+  };
+}
 export function filterIncidents(
   items: Incident[],
   q: IncidentQuery,
+  range = queryDateBounds(q),
 ): Incident[] {
   const terms =
     q.query?.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean) ?? [];
   return items
     .filter((item) => {
       const l = item.location,
-        date = incidentDate(item);
+        date = incidentDate(item, q.dateBasis);
       const inLongitude =
         q.west <= q.east
           ? l.longitude >= q.west && l.longitude <= q.east
@@ -275,20 +373,24 @@ export function filterIncidents(
       ]
         .join(" ")
         .toLocaleLowerCase();
+      const dateValue = date ? Date.parse(date) : NaN;
+      const dateOnly =
+        q.dateBasis === "event" && !item.occurredAt && Boolean(item.occurredOn);
       return (
         l.latitude >= q.south &&
         l.latitude <= q.north &&
         inLongitude &&
         Boolean(date) &&
-        Date.parse(date!) >= Date.parse(q.from) &&
-        Date.parse(date!) <= Date.parse(q.to) &&
+        dateValue >= (dateOnly ? range.dayFrom : range.from) &&
+        dateValue <= (dateOnly ? range.dayTo : range.to) &&
         (!q.categories?.length || q.categories.includes(item.category)) &&
         terms.every((term) => text.includes(term))
       );
     })
     .sort(
       (a, b) =>
-        Date.parse(incidentDate(b)!) - Date.parse(incidentDate(a)!) ||
+        Date.parse(incidentDate(b, q.dateBasis)!) -
+          Date.parse(incidentDate(a, q.dateBasis)!) ||
         (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     );
 }
@@ -297,14 +399,18 @@ export function paginate(
   query: IncidentQuery,
 ): IncidentResponse {
   const cursor = query.cursor ? decodeCursor(query.cursor) : null;
+  if (cursor && cursor.dateBasis !== query.dateBasis)
+    throw new Error("Cursor date basis does not match query");
   const limit = query.limit ?? 500;
   if (!Number.isSafeInteger(limit) || limit < 1)
     throw new Error("Invalid pagination");
   const remaining = cursor
     ? items.filter(
         (i) =>
-          Date.parse(incidentDate(i)!) < Date.parse(cursor.date) ||
-          (Date.parse(incidentDate(i)!) === Date.parse(cursor.date) &&
+          Date.parse(incidentDate(i, query.dateBasis)!) <
+            Date.parse(cursor.date) ||
+          (Date.parse(incidentDate(i, query.dateBasis)!) ===
+            Date.parse(cursor.date) &&
             i.id > cursor.id),
       )
     : items;
@@ -312,16 +418,29 @@ export function paginate(
   return {
     items: page,
     total: items.length,
-    nextCursor: remaining.length > limit ? encodeCursor(page.at(-1)!) : null,
+    nextCursor:
+      remaining.length > limit
+        ? encodeCursor(page.at(-1)!, query.dateBasis)
+        : null,
   };
 }
-export function encodeCursor(item: Incident): string {
-  return btoa(JSON.stringify({ date: incidentDate(item), id: item.id }))
+export function encodeCursor(item: Incident, dateBasis?: DateBasis): string {
+  return btoa(
+    JSON.stringify({
+      date: new Date(incidentDate(item, dateBasis)!).toISOString(),
+      id: item.id,
+      dateBasis,
+    }),
+  )
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/, "");
 }
-export function decodeCursor(value: string): { date: string; id: string } {
+export function decodeCursor(value: string): {
+  date: string;
+  id: string;
+  dateBasis?: DateBasis;
+} {
   try {
     const cursor = JSON.parse(
       atob(value.replaceAll("-", "+").replaceAll("_", "/")),
@@ -329,8 +448,16 @@ export function decodeCursor(value: string): { date: string; id: string } {
     if (
       typeof cursor.date !== "string" ||
       !Number.isFinite(Date.parse(cursor.date)) ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(
+        cursor.date,
+      ) ||
+      new Date(cursor.date).toISOString().slice(0, 19) !==
+        cursor.date.slice(0, 19) ||
       typeof cursor.id !== "string" ||
-      !cursor.id.length
+      !cursor.id.length ||
+      (cursor.dateBasis !== undefined &&
+        cursor.dateBasis !== "event" &&
+        cursor.dateBasis !== "publication")
     )
       throw new Error();
     return cursor;
@@ -342,13 +469,8 @@ export function calculateStatistics(
   items: Incident[],
   query: IncidentQuery,
 ): IncidentStatistics {
-  const current = filterIncidents(items, query),
-    duration = Date.parse(query.to) - Date.parse(query.from);
-  const previous = filterIncidents(items, {
-    ...query,
-    from: new Date(Date.parse(query.from) - duration - 1).toISOString(),
-    to: new Date(Date.parse(query.from) - 1).toISOString(),
-  });
+  const current = filterIncidents(items, query);
+  const previous = filterIncidents(items, query, previousDateBounds(query));
   const counts = Object.fromEntries(categories.map((c) => [c, 0])) as Record<
     IncidentCategory,
     number

@@ -1,16 +1,10 @@
 import { load } from "cheerio/slim";
 import { hash } from "./hash";
 import { classify, isCandidate } from "./processor";
+import { sourceById } from "./sources";
 import type { RawItem, SourceCollector, SourceDefinition } from "./types";
 
-export const policeSource: SourceDefinition = {
-  id: "npu-telegram",
-  name: "Національна поліція України",
-  url: "https://t.me/s/UA_National_Police",
-  verificationUrl:
-    "https://if.npu.gov.ua/news/natspolitsiya-zapustila-shche-odin-nomer-garyachoi-linii-z-poshuku-zniklikh-chi-zagiblikh-vnaslidok-viyskovikh-diy-rf-v-ukraini",
-};
-const channel = "UA_National_Police";
+export const policeSource = sourceById("npu-telegram")!;
 const agent = "CrimeRadar/0.2 (+https://crime-radar.w-siteee.workers.dev)";
 export class SourceAccessError extends Error {}
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,16 +116,78 @@ export function robotsAllows(text: string, path: string): boolean {
   return rules[0]?.allow ?? true;
 }
 
-export async function parsePolicePage(
+function telegramChannelOf(source: SourceDefinition): string {
+  const channel = source.telegramChannel;
+  try {
+    const url = new URL(source.url);
+    if (
+      source.transport === "telegram" &&
+      channel &&
+      /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(channel) &&
+      url.protocol === "https:" &&
+      url.hostname === "t.me" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      !url.search &&
+      !url.hash &&
+      url.pathname === `/s/${channel}`
+    )
+      return channel;
+  } catch {
+    // Only explicitly configured public Telegram channel URLs are accepted.
+  }
+  throw new SourceAccessError("Invalid public Telegram source configuration");
+}
+
+function telegramPostNumber(post: string, channel: string): number | null {
+  const prefix = `${channel}/`;
+  if (!post.startsWith(prefix)) return null;
+  const suffix = post.slice(prefix.length);
+  if (!/^[1-9][0-9]*$/.test(suffix)) return null;
+  const number = Number(suffix);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+/** Record a trusted article link as provenance without following it. */
+function canonicalArticle(
+  source: SourceDefinition,
+  value: string,
+): string | undefined {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      !source.canonicalHosts?.includes(url.hostname) ||
+      !/^\/news\/[a-z0-9_-]+$/.test(url.pathname)
+    )
+      return undefined;
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+async function parseTelegramPageWithCursor(
   html: string,
+  source: SourceDefinition,
   retrievedAt: string,
-): Promise<RawItem[]> {
+): Promise<{ items: RawItem[]; oldestPost: number | undefined }> {
+  const channel = telegramChannelOf(source);
   const $ = load(html);
   const result = new Map<string, RawItem>();
+  let oldestPost: number | undefined;
   for (const element of $(".tgme_widget_message[data-post]").toArray()) {
     const root = $(element),
       post = root.attr("data-post") ?? "";
-    if (!new RegExp(`^${channel}/[0-9]+$`).test(post)) continue;
+    const postNumber = telegramPostNumber(post, channel);
+    if (postNumber === null) continue;
+    oldestPost = Math.min(oldestPost ?? postNumber, postNumber);
     const node = root.find(".tgme_widget_message_text").first().clone();
     node.find("script,style").remove();
     node.find("br").replaceWith("\n");
@@ -141,8 +197,7 @@ export async function parsePolicePage(
       .replace(/\u00a0/g, " ")
       .trim();
     const date = root
-      .closest(".tgme_widget_message_wrap")
-      .find("time[datetime]")
+      .find(".tgme_widget_message_date time[datetime], time[datetime]")
       .first()
       .attr("datetime");
     if (!content || content.length > 50000) continue;
@@ -156,24 +211,11 @@ export async function parsePolicePage(
       "";
     let canonicalUrl: string | undefined;
     for (const link of node.find("a[href]").toArray()) {
-      try {
-        const u = new URL($(link).attr("href")!);
-        if (
-          u.protocol === "https:" &&
-          (u.hostname === "npu.gov.ua" || u.hostname.endsWith(".npu.gov.ua")) &&
-          u.pathname.startsWith("/news/")
-        ) {
-          u.search = "";
-          u.hash = "";
-          canonicalUrl = u.href;
-          break;
-        }
-      } catch {
-        /* Untrusted links are ignored and never followed. */
-      }
+      canonicalUrl = canonicalArticle(source, $(link).attr("href")!);
+      if (canonicalUrl) break;
     }
     const item: RawItem = {
-      sourceId: policeSource.id,
+      sourceId: source.id,
       externalId: post,
       sourceUrl: `https://t.me/${post}`,
       title,
@@ -185,25 +227,52 @@ export async function parsePolicePage(
       retrievedAt,
       contentHash: await hash(content),
       canonicalUrl,
+      isRepost: root.find(".tgme_widget_message_forwarded_from").length > 0,
     };
     if (!result.has(post) || result.get(post)!.content.length < content.length)
       result.set(post, item);
   }
-  return [...result.values()];
+  return { items: [...result.values()], oldestPost };
+}
+
+export async function parseTelegramPage(
+  html: string,
+  source: SourceDefinition,
+  retrievedAt: string,
+): Promise<RawItem[]> {
+  return (await parseTelegramPageWithCursor(html, source, retrievedAt)).items;
+}
+
+/** Compatibility entry point for the original national channel parser. */
+export async function parsePolicePage(
+  html: string,
+  retrievedAt: string,
+): Promise<RawItem[]> {
+  return parseTelegramPage(html, policeSource, retrievedAt);
 }
 
 export class PoliceTelegramCollector implements SourceCollector {
-  source = policeSource;
   nextBefore?: number;
+  constructor(public source: SourceDefinition = policeSource) {
+    telegramChannelOf(source);
+  }
   async collect(
     options: { pages?: number; before?: number; signal?: AbortSignal } = {},
   ): Promise<RawItem[]> {
-    const pages = Math.min(10, Math.max(1, options.pages ?? 3));
+    const channel = telegramChannelOf(this.source);
+    if (
+      (options.pages !== undefined &&
+        (!Number.isFinite(options.pages) || options.pages < 1)) ||
+      (options.before !== undefined &&
+        (!Number.isSafeInteger(options.before) || options.before < 1))
+    )
+      throw new SourceAccessError("Invalid Telegram pagination options");
+    const pages = Math.min(10, Math.floor(options.pages ?? 3));
+    this.nextBefore = undefined;
     const policy = await fetchText("https://t.me/robots.txt", options.signal);
     if (
       policy.status !== 404 &&
-      (policy.status !== 200 ||
-        !robotsAllows(policy.text, "/s/UA_National_Police"))
+      (policy.status !== 200 || !robotsAllows(policy.text, `/s/${channel}`))
     ) {
       throw new SourceAccessError(
         "Source robots policy does not permit collection",
@@ -232,19 +301,19 @@ export class PoliceTelegramCollector implements SourceCollector {
         throw new SourceAccessError(
           `Source access failed: HTTP ${response.status}`,
         );
-      const parsed = await parsePolicePage(
+      const parsed = await parseTelegramPageWithCursor(
         response.text,
+        this.source,
         new Date().toISOString(),
       );
-      if (!parsed.length)
+      if (parsed.oldestPost === undefined)
         throw new SourceAccessError(
           "Source layout changed or empty page; collection stopped",
         );
-      for (const item of parsed) items.set(item.externalId, item);
-      const next = Math.min(
-        ...parsed.map((item) => Number(item.externalId.split("/")[1])),
-      );
-      if (next === before) break;
+      for (const item of parsed.items) items.set(item.externalId, item);
+      const next = parsed.oldestPost;
+      // Media-only posts count towards the cursor. Foreign channel IDs never do.
+      if (before !== undefined && next >= before) break;
       before = next;
       this.nextBefore = next;
     }

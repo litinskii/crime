@@ -69,6 +69,12 @@ export interface SourceStatus {
     kind: "official" | "media" | "court";
     published?: number;
     pending?: number;
+    latestPublicationAt?: string | null;
+    lastNewItemAt?: string | null;
+    oldestPendingAt?: string | null;
+    lastProcessedAt?: string | null;
+    counts?: Record<string, number>;
+    rejectionReasons?: Record<string, number>;
     next_attempt_at?: number;
     last_error?: string | null;
     last_success_at: string | null;

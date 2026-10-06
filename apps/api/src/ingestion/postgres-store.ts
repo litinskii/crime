@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import type { Incident } from "@crime-radar/shared";
+import { incidentDate, type Incident } from "@crime-radar/shared";
 import { similarity, ruleVersion } from "./processor";
 import type {
   IngestionStore,
@@ -36,7 +36,7 @@ export class PostgresIngestionStore implements IngestionStore {
           source.name,
           source.url,
           {
-            verificationUrl: source.verificationUrl,
+            ...source,
             rules: ruleVersion,
             rawRetentionDays: 90,
           },
@@ -60,7 +60,12 @@ export class PostgresIngestionStore implements IngestionStore {
     const old = await this.db.query<{
       id: string;
       content_hash: string;
-      metadata: { rules?: string; canonicalUrl?: string };
+      metadata: {
+        rules?: string;
+        canonicalUrl?: string;
+        isRepost?: boolean;
+        originalPublishedAt?: string;
+      };
       processing_status: string;
       published_at: Date | null;
     }>(
@@ -75,7 +80,9 @@ export class PostgresIngestionStore implements IngestionStore {
         previous.processing_status,
       ) &&
       (previous.published_at?.toISOString() ?? null) === item.publishedAt &&
-      previous.metadata.canonicalUrl === item.canonicalUrl
+      previous.metadata.canonicalUrl === item.canonicalUrl &&
+      Boolean(previous.metadata.isRepost) === Boolean(item.isRepost) &&
+      previous.metadata.originalPublishedAt === item.originalPublishedAt
     ) {
       await this.db.query(
         "UPDATE raw_source_items SET retrieved_at=$2 WHERE id=$1",
@@ -97,7 +104,12 @@ export class PostgresIngestionStore implements IngestionStore {
             item.contentHash,
             item.publishedAt,
             item.retrievedAt,
-            { canonicalUrl: item.canonicalUrl, rules: ruleVersion },
+            {
+              canonicalUrl: item.canonicalUrl,
+              rules: ruleVersion,
+              isRepost: item.isRepost,
+              originalPublishedAt: item.originalPublishedAt,
+            },
           ],
         );
       } else {
@@ -113,7 +125,12 @@ export class PostgresIngestionStore implements IngestionStore {
             item.publishedAt,
             item.retrievedAt,
             item.contentHash,
-            { canonicalUrl: item.canonicalUrl, rules: ruleVersion },
+            {
+              canonicalUrl: item.canonicalUrl,
+              rules: ruleVersion,
+              isRepost: item.isRepost,
+              originalPublishedAt: item.originalPublishedAt,
+            },
           ],
         );
         id = inserted.rows[0].id;
@@ -143,28 +160,53 @@ export class PostgresIngestionStore implements IngestionStore {
         result.status;
       let reason = result.status === "published" ? null : result.reason;
       if (result.status !== "published") {
-        // An edited post which no longer passes publication retracts its linked public record.
-        await this.db.query(
-          "UPDATE incidents SET is_published=false,updated_at=now() WHERE id IN (SELECT incident_id FROM incident_sources WHERE raw_source_item_id=$1)",
-          [id],
-        );
+        await this.retractRaw(id);
       } else {
         const incident = result.incident;
-        const same = await this.db.query<{ id: string; public_data: Incident }>(
-          "SELECT id,public_data FROM incidents WHERE canonical_key=$1 OR fingerprint=$2 ORDER BY created_at LIMIT 1",
-          [result.canonicalKey, result.fingerprint],
-        );
-        const existing = same.rows[0];
-        const candidates = await this.db.query<{ title: string }>(
-          `SELECT r.title FROM incidents i JOIN incident_sources s ON s.incident_id=i.id JOIN raw_source_items r ON r.id=s.raw_source_item_id
-          WHERE i.category=$1 AND i.public_data->'location'->>'city'=$2 AND i.published_at BETWEEN $3::timestamptz-interval '7 days' AND $3::timestamptz+interval '7 days' AND i.id<>$4 LIMIT 30`,
+        const eventDate =
+          incident.occurredAt ??
+          (incident.occurredOn ? `${incident.occurredOn}T00:00:00Z` : null);
+        const ownPublishedAt = incident.publishedAt;
+        const ownProof = eventDate
+          ? {
+              occurredAt: incident.occurredAt,
+              occurredOn: incident.occurredOn,
+              eventDateEvidence: incident.eventDateEvidence,
+            }
+          : null;
+        const same = await this.db.query<{
+          id: string;
+          public_data: Incident;
+          canonical_key: string;
+          is_published: boolean;
+        }>(
+          `SELECT id,public_data,canonical_key,is_published FROM incidents WHERE id=$3 OR canonical_key=$1 OR (fingerprint=$2 AND (($4::timestamptz IS NOT NULL AND occurred_at >= date_trunc('day',$4::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AND occurred_at < (date_trunc('day',$4::timestamptz AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC') OR ($4::timestamptz IS NULL AND occurred_at IS NULL AND published_at BETWEEN $5::timestamptz-interval '7 days' AND $5::timestamptz+interval '7 days'))) ORDER BY (id=$3 OR canonical_key=$1) DESC,created_at LIMIT 1`,
           [
-            incident.category,
-            incident.location.city,
-            incident.publishedAt,
+            result.canonicalKey,
+            result.fingerprint,
             incident.id,
+            eventDate,
+            incident.publishedAt,
           ],
         );
+        const existing = same.rows[0];
+        const candidates =
+          existing || raw.sourceId === "court-decisions"
+            ? { rows: [] }
+            : await this.db.query<{ title: string }>(
+                `SELECT r.title FROM incidents i JOIN incident_sources s ON s.incident_id=i.id JOIN raw_source_items r ON r.id=s.raw_source_item_id
+          WHERE i.is_published=true AND s.active AND i.category=$1 AND i.public_data->'location'->>'city'=$2
+          AND (($5::timestamptz IS NOT NULL AND i.occurred_at >= date_trunc('day',$5::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AND i.occurred_at < (date_trunc('day',$5::timestamptz AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC')
+          OR ($5::timestamptz IS NULL AND i.occurred_at IS NULL AND i.published_at BETWEEN $3::timestamptz-interval '7 days' AND $3::timestamptz+interval '7 days'))
+          AND i.id<>$4 LIMIT 30`,
+                [
+                  incident.category,
+                  incident.location.city,
+                  incident.publishedAt,
+                  incident.id,
+                  eventDate,
+                ],
+              );
         if (
           !existing &&
           candidates.rows.some(
@@ -173,20 +215,52 @@ export class PostgresIngestionStore implements IngestionStore {
         ) {
           status = "review";
           reason = "possible-duplicate";
-          await this.db.query(
-            "UPDATE incidents SET is_published=false,updated_at=now() WHERE id IN (SELECT incident_id FROM incident_sources WHERE raw_source_item_id=$1)",
-            [id],
-          );
+          await this.retractRaw(id);
         } else {
+          let canonicalKey = result.canonicalKey;
           if (existing) {
+            if (
+              existing.id !== incident.id &&
+              existing.canonical_key !== result.canonicalKey
+            )
+              canonicalKey = existing.canonical_key;
             incident.id = existing.id;
+            const support = await this.db.query<{
+              event_data: typeof ownProof;
+              published_at: Date | null;
+              source_url: string;
+            }>(
+              "SELECT event_data,published_at,source_url FROM incident_sources WHERE incident_id=$1 AND active AND raw_source_item_id IS DISTINCT FROM $2 ORDER BY source_url",
+              [incident.id, id],
+            );
+            const proof = support.rows.find(
+              (row) => row.event_data,
+            )?.event_data;
+            if (!eventDate && proof) {
+              incident.occurredAt = proof.occurredAt ?? null;
+              incident.occurredOn = proof.occurredOn ?? undefined;
+              incident.eventDateEvidence = proof.eventDateEvidence ?? undefined;
+            }
+            const latest = support.rows.reduce(
+              (date, row) =>
+                row.published_at &&
+                row.published_at.getTime() > Date.parse(date!)
+                  ? row.published_at.toISOString()
+                  : date,
+              ownPublishedAt,
+            );
+            if (latest) incident.publishedAt = incident.reportedAt = latest;
+            const activeUrls = new Set(
+              support.rows.map((row) => row.source_url),
+            );
             incident.sources = [
               ...existing.public_data.sources.filter(
-                (source) => source.url !== raw.sourceUrl,
+                (source) => source.url && activeUrls.has(source.url),
               ),
               ...incident.sources,
             ];
             if (
+              existing.is_published &&
               existing.public_data.sources.every(
                 (source) => source.url !== raw.sourceUrl,
               )
@@ -202,24 +276,21 @@ export class PostgresIngestionStore implements IngestionStore {
           ]
             .join(" ")
             .toLocaleLowerCase("uk");
-          await this.db.query(
-            "UPDATE incidents SET is_published=false,updated_at=now() WHERE id IN (SELECT incident_id FROM incident_sources WHERE raw_source_item_id=$1) AND id<>$2",
-            [id, incident.id],
-          );
+          await this.retractRaw(id, incident.id);
           await this.db.query(
             `INSERT INTO incidents(id,category,occurred_at,published_at,public_location,location_precision,public_data,search_text,confidence,is_published,canonical_key,fingerprint)
             VALUES($1,$2,$11,$3,ST_SetSRID(ST_MakePoint($4,$5),4326),'city',$6,$7,$8,true,$9,$10)
-            ON CONFLICT(id) DO UPDATE SET category=excluded.category,occurred_at=excluded.occurred_at,published_at=excluded.published_at,public_location=excluded.public_location,public_data=excluded.public_data,search_text=excluded.search_text,confidence=excluded.confidence,is_published=true,fingerprint=excluded.fingerprint,updated_at=now()`,
+            ON CONFLICT(id) DO UPDATE SET category=excluded.category,occurred_at=excluded.occurred_at,published_at=excluded.published_at,public_location=excluded.public_location,public_data=excluded.public_data,search_text=excluded.search_text,confidence=excluded.confidence,is_published=true,canonical_key=excluded.canonical_key,fingerprint=excluded.fingerprint,updated_at=now()`,
             [
               incident.id,
               incident.category,
-              incident.publishedAt,
+              incident.publishedAt ?? null,
               incident.location.longitude,
               incident.location.latitude,
               incident,
               search,
               incident.confidence,
-              result.canonicalKey,
+              canonicalKey,
               result.fingerprint,
               incident.occurredAt ??
                 (incident.occurredOn
@@ -228,8 +299,16 @@ export class PostgresIngestionStore implements IngestionStore {
             ],
           );
           await this.db.query(
-            `INSERT INTO incident_sources(incident_id,source_id,source_url,raw_source_item_id,published_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(incident_id,source_id,source_url) DO UPDATE SET raw_source_item_id=excluded.raw_source_item_id,published_at=excluded.published_at`,
-            [incident.id, raw.sourceId, raw.sourceUrl, id, raw.publishedAt],
+            `INSERT INTO incident_sources(incident_id,source_id,source_url,raw_source_item_id,published_at,active,event_date,event_data) VALUES($1,$2,$3,$4,$5,true,$6,$7) ON CONFLICT(incident_id,source_id,source_url) DO UPDATE SET raw_source_item_id=excluded.raw_source_item_id,published_at=excluded.published_at,active=true,event_date=excluded.event_date,event_data=excluded.event_data`,
+            [
+              incident.id,
+              raw.sourceId,
+              raw.sourceUrl,
+              id,
+              ownPublishedAt,
+              eventDate,
+              ownProof,
+            ],
           );
           await this.db.query(
             `INSERT INTO geocoding_city_cache(normalized_key,provider,result) VALUES($1,'city-gazetteer-v1',$2) ON CONFLICT(normalized_key) DO UPDATE SET result=excluded.result,updated_at=now()`,
@@ -250,6 +329,64 @@ export class PostgresIngestionStore implements IngestionStore {
     } catch (error) {
       await this.db.query("ROLLBACK");
       throw error;
+    }
+  }
+  private async retractRaw(rawId: string, except?: string) {
+    const changed = await this.db.query<{ incident_id: string }>(
+      "UPDATE incident_sources SET active=false WHERE raw_source_item_id=$1 AND active AND ($2::text IS NULL OR incident_id<>$2) RETURNING incident_id",
+      [rawId, except ?? null],
+    );
+    for (const incidentId of new Set(
+      changed.rows.map((row) => row.incident_id),
+    )) {
+      const supports = await this.db.query<{
+        source_url: string;
+        published_at: Date | null;
+        event_data: Pick<
+          Incident,
+          "occurredAt" | "occurredOn" | "eventDateEvidence"
+        > | null;
+      }>(
+        "SELECT source_url,published_at,event_data FROM incident_sources WHERE incident_id=$1 AND active ORDER BY source_url",
+        [incidentId],
+      );
+      if (!supports.rows.length) {
+        await this.db.query(
+          "UPDATE incidents SET is_published=false,updated_at=now() WHERE id=$1",
+          [incidentId],
+        );
+        continue;
+      }
+      const row = await this.db.query<{ public_data: Incident }>(
+        "SELECT public_data FROM incidents WHERE id=$1",
+        [incidentId],
+      );
+      const incident = row.rows[0].public_data;
+      const urls = new Set(supports.rows.map((s) => s.source_url));
+      incident.sources = incident.sources.filter(
+        (s) => s.url && urls.has(s.url),
+      );
+      const proof = supports.rows.find((s) => s.event_data)?.event_data;
+      incident.occurredAt = proof?.occurredAt ?? null;
+      incident.occurredOn = proof?.occurredOn ?? undefined;
+      incident.eventDateEvidence = proof?.eventDateEvidence ?? undefined;
+      const latest = supports.rows.reduce(
+        (timestamp, s) => Math.max(timestamp, s.published_at?.getTime() ?? 0),
+        0,
+      );
+      incident.publishedAt = latest
+        ? new Date(latest).toISOString()
+        : undefined;
+      incident.reportedAt = incident.publishedAt;
+      await this.db.query(
+        "UPDATE incidents SET public_data=$2,occurred_at=$3,published_at=$4,is_published=true,updated_at=now() WHERE id=$1",
+        [
+          incidentId,
+          incident,
+          incidentDate(incident, "event") ?? null,
+          incident.publishedAt ?? null,
+        ],
+      );
     }
   }
   async failItem(id: string, reason: string) {

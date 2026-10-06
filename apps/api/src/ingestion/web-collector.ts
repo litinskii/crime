@@ -301,6 +301,6 @@ export function createCollector(
   if (!source || source.transport === "court")
     throw new SourceAccessError("Source is not a scheduled web collector");
   return source.transport === "telegram"
-    ? new PoliceTelegramCollector()
+    ? new PoliceTelegramCollector(source)
     : new WebCollector(source);
 }
