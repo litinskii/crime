@@ -32,7 +32,7 @@ it("accepts signed tokens only for the exact harvest workflow, repository identi
       repository_owner_id: "10028441",
       ref: "refs/heads/main",
       workflow_ref: harvestWorkflow,
-      sub: "repo:litinskii/crime:ref:refs/heads/main",
+      sub: "repo:litinskii@10028441/crime@1406961985:ref:refs/heads/main",
       iat: now,
       nbf: now,
       exp: now + 300,
@@ -59,6 +59,7 @@ it("accepts signed tokens only for the exact harvest workflow, repository identi
   for (const wrong of [
     { ref: "refs/heads/other" },
     { repository_id: "1" },
+    { sub: "repo:litinskii@1/crime@1406961985:ref:refs/heads/main" },
     {
       workflow_ref:
         "litinskii/crime/.github/workflows/verify.yml@refs/heads/main",

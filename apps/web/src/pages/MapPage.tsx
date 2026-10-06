@@ -183,7 +183,7 @@ export default function MapPage({
       </Suspense>
       <div className="top-controls">
         <header className="top-bar">
-          <a href="/" className="brand" aria-label="Crime Radar">
+          <a href="/" className="brand">
             <span className="brand-icon">
               <Radar size={26} />
             </span>

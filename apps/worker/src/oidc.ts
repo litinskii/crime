@@ -42,7 +42,8 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       claims.repository_owner_id !== "10028441" ||
       claims.ref !== "refs/heads/main" ||
       claims.workflow_ref !== harvestWorkflow ||
-      claims.sub !== "repo:litinskii/crime:ref:refs/heads/main" ||
+      claims.sub !==
+        "repo:litinskii@10028441/crime@1406961985:ref:refs/heads/main" ||
       typeof claims.exp !== "number" ||
       claims.exp <= now ||
       typeof claims.nbf !== "number" ||

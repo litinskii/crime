@@ -2,7 +2,7 @@
 """Harvest official daily registry metadata; the Worker fetches and validates RTF itself.
 No judgment texts or personal fields are saved in the repository or Actions cache.
 """
-import argparse,csv,datetime,io,json,os,pathlib,time,urllib.request,urllib.error,zipfile,tempfile,re,base64
+import argparse,csv,datetime,io,json,os,pathlib,time,urllib.request,urllib.error,zipfile,tempfile,re
 parser=argparse.ArgumentParser()
 parser.add_argument('--archive')
 parser.add_argument('--since',default=(datetime.date.today()-datetime.timedelta(days=90)).isoformat())
@@ -42,10 +42,6 @@ def harvest_token():
   request=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
   with urllib.request.urlopen(request,timeout=30) as response:ci_token=json.load(response)['value']
   ci_token_time=time.time()
-  # Public workflow identity only; never print the signed token or its signature.
-  segment=ci_token.split('.')[1]
-  identity=json.loads(base64.urlsafe_b64decode(segment+'='*(-len(segment)%4)))
-  print(json.dumps({'harvestIdentity':{key:identity.get(key) for key in ('iss','aud','repository','repository_id','repository_owner_id','ref','workflow_ref','sub')}}),flush=True)
  return ci_token
 if not args.archive:
  data=request_json('https://data.gov.ua/api/3/action/package_show?id=ediniy-derzhavniy-reestr-sudovih-rishen-za-2026-rik_7636')['result']
