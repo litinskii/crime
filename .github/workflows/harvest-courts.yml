@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/harvest-courts.yml"
       - "scripts/harvest-courts.py"
+      - "apps/worker/src/oidc.ts"
 permissions:
   contents: read
   id-token: write

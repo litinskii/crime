@@ -22,6 +22,7 @@ function decode(value: string) {
   );
 }
 export async function authorizedHarvester(request: Request): Promise<boolean> {
+  let phase = "decode";
   try {
     const token = request.headers
       .get("Authorization")
@@ -58,6 +59,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       cache.until < Date.now() ||
       !cache.keys.some((key) => key.kid === header.kid)
     ) {
+      phase = "fetch-keys";
       const response = await fetch(`${issuer}/.well-known/jwks`, {
         signal: AbortSignal.timeout(10000),
         redirect: "error",
@@ -77,6 +79,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
         key.use === "sig",
     );
     if (!jwk) return reject("key-not-found");
+    phase = "import-key";
     const key = await crypto.subtle.importKey(
       "jwk",
       jwk,
@@ -84,6 +87,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       false,
       ["verify"],
     );
+    phase = "verify-signature";
     return await crypto.subtle.verify(
       "RSASSA-PKCS1-v1_5",
       key,
@@ -91,6 +95,8 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
     );
   } catch (error) {
-    return reject(error instanceof Error ? error.name : "verification-error");
+    return reject(
+      `${phase}:${error instanceof Error ? error.name : "verification-error"}`,
+    );
   }
 }
