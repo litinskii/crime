@@ -9,19 +9,21 @@
     "start": "node --env-file-if-exists=.env dist/server.js",
     "typecheck": "tsc -p tsconfig.json",
     "db:migrate": "tsx --env-file-if-exists=.env src/database/migrate.ts",
-    "db:seed": "tsx --env-file-if-exists=.env src/database/seed.ts"
+    "db:seed": "tsx --env-file-if-exists=.env src/database/seed.ts",
+    "ingest": "tsx --env-file-if-exists=.env src/ingestion/cli.ts"
   },
   "dependencies": {
     "@crime-radar/shared": "*",
-    "fastify": "^5.6.1",
     "@fastify/cors": "^11.1.0",
     "@fastify/rate-limit": "^10.3.0",
+    "cheerio": "^1.2.0",
+    "fastify": "^5.6.1",
     "pg": "^8.16.3",
     "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/pg": "^8.15.5",
-    "tsx": "^4.20.6",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.6"
   }
 }

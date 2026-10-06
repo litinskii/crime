@@ -1,58 +1,36 @@
-# Crime Radar Data Platform — implementation specification
+# Crime Radar data platform
 
-Source: [the supplied planning discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). This document records the independent second project and its remaining work. **The current implementation is the API/database foundation, not a live ingestion platform.**
+Based on the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). The first real-data MVP runs in Cloudflare Workers + D1. Fastify and PostgreSQL/PostGIS remain independently runnable for richer spatial needs; production needs no external database host.
 
-## Implemented foundation
+## First verified source
 
-- Fastify API, request validation, bounded results, opaque keyset pagination and allowed-origin CORS.
-- PostgreSQL/PostGIS tables for sources, raw items, incidents, provenance, private locations, geocoding cache and processing jobs.
-- Public spatial GiST index and event/report/publication date index.
-- Synthetic seed compatible with the bilingual frontend contract.
-- Visible-area statistics over the full matching dataset, independent of page size.
-- Unit/API tests plus optional integration tests against a migrated, seeded PostGIS database.
+The collector reads the ordinary public HTML preview of [Ukraine's National Police Telegram channel](https://t.me/s/UA_National_Police). An [official police publication](https://if.npu.gov.ua/news/natspolitsiya-zapustila-shche-odin-nomer-garyachoi-linii-z-poshuku-zniklikh-chi-zagiblikh-vnaslidok-viyskovikh-diy-rf-v-ukraini) links to this channel. Direct police-site collection returned a Cloudflare block and was not used or bypassed.
 
-The two applications live in one npm workspace to share types and filters while the product is being developed. They remain independently runnable/buildable and can be extracted into separate repositories later. The database currently uses explicit parameterized SQL instead of an ORM: the schema is small, and the PostGIS query behavior stays visible and testable.
+The collector checks robots.txt before each run (currently 404), respects disallows and refuses redirects, access blocks and changed layouts. Requests have a descriptive agent, 15-second timeout, bounded response and three attempts for 429/5xx with backoff. Pagination pauses between pages; production reads one page/request. Only the official channel's numeric post IDs and canonical HTTPS police news URLs are accepted. Links in source text are never executed or followed.
 
-## Pipeline to implement
+## Implemented pipeline
 
-Public sources → collectors → raw storage → extraction → classification → location extraction → geocoding → privacy processing → deduplication → normalization → PostgreSQL/PostGIS → API.
+Collector → private originals/versions → durable queue → category/city extraction → offline geocoding → safe bilingual metadata → exact dedupe/review → public records → incidents/statistics API.
 
-Implement one verified official source before adding more. Start with National Police or one regional police publication source. Government open datasets, emergency services and court documents are later adapters. Verify each source's availability, robots rules, terms, update frequency and publication structure before implementation. No frontend component reads source sites.
+- Preserve source/external ID, URL, title/text, nullable publication date, retrieval time and SHA-256 hash. Undated gallery posts remain undated.
+- Idempotence compares external identity, hash, publication date, canonical link and rules version. Edits reprocess and retain versions. Hashes are indexed rather than unique, so reposts retain provenance before publication dedupe.
+- D1 stages pages atomically in small batches and drains three items/run. A source lease prevents overlap. Processing retries three times. Cron runs every ten minutes; queued items survive pagination.
+- Classify one supported category from the headline. Advice, war/evacuation and ambiguous categories are excluded. Event time, legal article and case status are not guessed.
+- Recognize ten original cities plus Lutsk and their supported name forms. A gazetteer provides cached centroids. Unknown, region-only or multi-city places stay unpublished for review. No residence/address is sent to an external geocoder.
+- Summaries are Ukrainian/English templates made solely from allowlisted category/city. They explain city-centre precision, unknown event time and the source link. Raw names, contacts and addresses cannot enter them. This is limited metadata, not a full article translation or general-purpose PII redactor.
+- Canonical article identity or category/city/content fingerprint merges exact reposts and preserves source links. Headline similarity ≥0.70 within seven publication days triggers review, never an automatic fuzzy merge. Confidence is fixed metadata, not calibrated accuracy or a danger score.
+- Edited records that fail publication are withdrawn. Source outages alone do not erase records. Raw text/versions expire after 90 days; provenance and safe public summaries remain. Raw/review records have no public endpoint.
 
-Each `SourceCollector.collect(context)` returns raw records containing source ID, external ID where available, source URL, original title/content, language, publication timestamp, raw location and metadata. Preserve retrieval timestamp and content hash. The raw table has uniqueness constraints on `(source_id, external_id)` and `(source_id, content_hash)` to support idempotent runs. Source updates must update/version raw content and trigger deliberate reprocessing rather than being silently discarded. Use stored HTML/JSON fixtures for tests; never hit government sites during unit tests.
+Production executes parameterized SQLite bounds/date/category/search queries, keyset pagination and full statistics. It is not PostGIS; advanced spatial analysis can use the retained adapter. PostgreSQL public queries explicitly separate real records from the demo seed.
 
-Job stages: collected, parsed, geocoded, normalized, duplicate, rejected, published, failed. Record failures and attempts. Keep collectors separate from classification and normalization. Apply concurrency limits, delays, timeouts and exponential backoff. Store per-source last successful/failed run, discovered counts and processed counts. Scheduling belongs to the job runner, not to collectors; cron is enough initially.
+## Operations and validation
 
-## Data and quality rules
+Public `/api/v1/status` reports check times and published coverage. Private run history stores counts/errors; statuses/reasons and jobs support investigation without logging originals. Manual collection is bearer-secret protected and fetches a fixed source. No review UI exists yet; Cloudflare account access is required to inspect originals/review rows.
 
-Canonical categories: violence, theft, robbery, fraud, drugs, weapons, traffic, fire, other. IDs stay language-independent. Allow future subcategories. Prefer structured source metadata and legal articles before inference; maintain legal mappings in their own module and validate them before live use.
+Tests use fictional HTML/records and execute D1 SQL in SQLite. They cover provenance/date parsing, robots, privacy, exact/review dedupe, edits/retraction, persistent queues, leases, retry bounds, retention, spatial/date filters, search, pagination/statistics, private-route protection and Free-plan query bounds. Optional PostGIS integration validates the other adapter. Real-source smoke runs and HTTPS/browser checks supplement these tests. See [deployment.md](deployment.md) for setup and quotas.
 
-Distinguish occurredAt, reportedAt and publishedAt. Unknown event times stay null; never invent them from a publication timestamp. The frontend/API interval filtering currently falls back to reportedAt then publishedAt and labels the date type. A future API should expose explicit date precision and date basis.
+## Remaining work
 
-Store region, city, district, street/intersection and extracted address when known. Location precision is exact/street/district/city/region/unknown; do not plot a region centroid as a precise street event. No identifiable private residence should be published with exact coordinates. Original coordinates belong to the private location table; the API queries only public coordinates. Privacy-safe output can use a deterministic displacement of 100–300m or a coarse centroid, based on precision and event context. Displacement must remain stable between requests.
+Additional verified sources; broader maintained geography; reliable event-time/place extraction with confidence/review; fuller privacy-checked summaries/translation; validated legal mappings; authenticated review/correction UI; measured dedupe quality; outage alerts/backfill checkpoints; and larger-scale spatial/search indexes.
 
-Publish summarized information without victims' or suspects' names, phone numbers, emails, apartment numbers, documents or other private identifiers. Raw source text needs restricted access and a retention policy. A generic regex is insufficient to establish privacy of real Ukrainian records; validate extraction on fixtures and review uncertain records before publication. No raw document endpoint is public.
-
-Every published incident must have provenance. Preserve source URLs, type, publication date, retrieval timestamp and relation to raw documents. Multiple sources may describe one incident. Source unavailability is tracked separately and must not automatically erase an incident.
-
-Deduplication should combine date/time proximity, public/internal location precision, category/legal article, text similarity and source relationships. Store match confidence and make thresholds configurable. Use a high-confidence merge tier, a review tier and a separate-record tier. The example 0.90/0.70 thresholds in the discussion require validation on real source fixtures; they are not proof of accuracy. Do not merge low-confidence records automatically.
-
-Keep geocoding behind `Geocoder.geocode(parsedLocation)`. Cache normalized queries, respect provider limits, and return null on insufficient location data. Keep optional AI extraction/translation behind provider interfaces. Validate structured responses with Zod and treat source text as data. Only normalized, privacy-processed titles and summaries should be translated; never send raw personal records to an AI provider by default. Store Ukrainian and English text and support reprocessing from preserved raw material.
-
-## API
-
-The implemented contract is documented in [api.md](./api.md). Keep this stable across ingestion implementations. Query by visible bounds and dates; server-side totals must include all matching incidents. Use spatial indexes, bounded response sizes and keyset pagination. Support bilingual keyword search, legal articles, cities and districts; for larger datasets replace substring matching with tested full-text/trigram indexes.
-
-In production use HTTPS, secret management, a restricted DB role for public reads, request validation/rate limiting, configured frontend origins and private ingestion/admin operations. The local Compose credentials are disposable development credentials, not production defaults.
-
-## Delivery phases
-
-1. **Foundation:** schema, PostGIS, seed, incidents/detail/statistics API (implemented).
-2. **First source:** verified collector + fixtures + raw persistence + job runner + extraction.
-3. **Location/category:** classification rules, event time confidence, location parsing and cached geocoding.
-4. **Publication gate:** privacy processing, source provenance, duplicate matching and English summaries.
-5. **Coverage:** additional sources, quality metrics, corrections and resilient scheduling.
-
-Expose internal metrics for missing event dates, coarse/unknown locations, failed geocoding, uncertain classification, possible duplicates and failed jobs. Structured logs should include job/source/raw item/incident IDs, stage, duration and errors without leaking personal content.
-
-First real-data MVP completion requires at least one real source, idempotent repeated ingestion, tested extraction/classification/geocoding/privacy/deduplication, Ukrainian and English summaries, provenance on every public incident, spatial/API integration tests and documented local deployment. Authentication, admin UI, subscriptions, payments, push notifications and social features remain out of scope.
+Coverage must remain visibly incomplete. City-centre markers and density must not imply actual incident locations or personal safety. Payments, subscriptions, social features and tracking remain outside current scope.

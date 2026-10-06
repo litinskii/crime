@@ -29,7 +29,11 @@ import {
   initialBounds,
   type Period,
 } from "../stores/preferences";
-import { incidentsRepository, isDemo } from "../repositories/incidents";
+import {
+  incidentsRepository,
+  isDemo,
+  getSourceStatus,
+} from "../repositories/incidents";
 import { analytics } from "../services";
 import type { MapController } from "../features/IncidentMap";
 import {
@@ -51,7 +55,7 @@ export default function MapPage({
   dark: boolean;
   online: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const preferences = usePreferences();
   const [bounds, setBounds] = useState(initialBounds);
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -117,6 +121,15 @@ export default function MapPage({
     retry: 1,
     networkMode: isDemo ? "always" : "online",
   });
+  const sourceStatus = useQuery({
+    queryKey: ["source-status"],
+    queryFn: ({ signal }) => getSourceStatus(signal),
+    enabled: !isDemo,
+    staleTime: 60000,
+    refetchInterval: 60000,
+    retry: 1,
+  });
+  const updated = sourceStatus.data?.sources[0]?.last_success_at;
   const detail = useQuery({
     queryKey: ["incident", selected],
     queryFn: ({ signal }) => incidentsRepository.getIncident(selected!, signal),
@@ -209,6 +222,7 @@ export default function MapPage({
             {t("ukraine")}
           </span>
           {demo && <span className="demo-pill">{t("demo")}</span>}
+          {!demo && <span className="live-pill">{t("liveReports")}</span>}
         </div>
       </div>
       <div className="map-mode" role="group" aria-label={t("heatmap")}>
@@ -326,7 +340,24 @@ export default function MapPage({
             </button>
           </div>
         </div>
-        <p className="data-caption">{demo ? t("demoNote") : t("coverage")}</p>
+        <p className="data-caption">
+          {demo ? t("demoNote") : t("liveCoverage")}
+          {!demo && updated && (
+            <span className="updated-caption">
+              {t("dataUpdated", {
+                date: new Date(updated).toLocaleString(
+                  i18n.language === "uk" ? "uk-UA" : "en-GB",
+                  {
+                    day: "numeric",
+                    month: "short",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  },
+                ),
+              })}
+            </span>
+          )}
+        </p>
       </div>
       {preferences.mode === "heatmap" && (
         <div className="density-key">

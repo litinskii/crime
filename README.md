@@ -1,14 +1,16 @@
 # Crime Radar
 
-Live demo: [crime-radar.w-siteee.workers.dev](https://crime-radar.w-siteee.workers.dev).
+Live app: [crime-radar.w-siteee.workers.dev](https://crime-radar.w-siteee.workers.dev).
 
 Mobile-first bilingual PWA for exploring **publicly reported incidents in Ukraine**. The map is the main interface; incident density is not a measure of personal danger or crime probability.
 
-Built from the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). The first release is a working product prototype with fictional data and an independently runnable API/database foundation. **Live source collectors and real incident ingestion are not implemented or enabled.** The frontend uses Cloudflare Workers Static Assets; the API is deployed separately in the next phase.
+Built from the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). Production uses real reports from the verified public Telegram channel of Ukraine's National Police. One Cloudflare Worker serves the PWA, API and scheduled collector; D1 stores private originals and public normalized records. Local development retains a labelled fictional mode and PostgreSQL/PostGIS adapter.
+
+**Coverage is deliberately limited:** one source and 11 supported city names. Only unambiguous city/category reports are plotted. Markers are city centres, not incident coordinates; incident time remains unknown. Bilingual summaries contain category/city metadata and a link to the actual report. This is neither complete crime coverage nor a danger score.
 
 ## Quick start
 
-Requires Node.js 22.12+ and npm. From the repository root:
+Requires Node.js 22.16+ and npm. From the repository root:
 
 ```sh
 npm ci
@@ -34,7 +36,7 @@ The production frontend is **apps/web/dist/**. Its service worker is generated d
 - Cluster tap zooms in; incident selection opens a sheet with collapsed, half and expanded states. A keyboard/screen-reader incident list is also available.
 - Category multi-select, keyword/legal-article search, 24h/7d/30d/1y and custom periods. Selected filters persist for the session.
 - Density mode and complete statistics for visible bounds, with a previous-period comparison where a nonzero baseline exists.
-- City search through a replaceable geocoding interface; demo search supports ten Ukrainian cities. A normalized address geocoder can be connected separately.
+- City search through a replaceable geocoding interface supports eleven Ukrainian cities. A normalized address geocoder can be connected separately.
 - Explicit geolocation button; no permission request on launch, no precise user-location persistence.
 - Ukrainian/English UI and bilingual incident summaries. Locale changes immediately and persists locally. Detection follows saved selection → browser language (uk otherwise en) → Ukrainian fallback if unavailable.
 - Light/dark/system themes, 320px layout, safe-area spacing, 44px controls, focus handling and reduced-motion styles.
@@ -47,6 +49,7 @@ The production frontend is **apps/web/dist/**. Its service worker is generated d
 ```text
 apps/web/        React + TypeScript + Vite PWA
 apps/api/        Fastify API + PostgreSQL/PostGIS foundation
+apps/worker/     Cloudflare API, D1 migrations and scheduled ingestion
 packages/shared Types, fictional fixtures, filtering and cursor utilities
 docs/           API contract, Cloudflare hosting and data-platform requirements
 ```
@@ -91,9 +94,9 @@ npm run db:migrate
 npm run db:seed
 ```
 
-Set `DATA_SOURCE=postgres` in `apps/api/.env`, then run `npm run dev:api`. The local API listens at **http://127.0.0.1:3000**; `/health` reports the storage mode. The database binds only to 127.0.0.1:54329. Its Compose credentials are disposable local credentials. The official PostGIS image uses linux/amd64 emulation on Apple Silicon; that setting can be removed on an amd64 machine.
+Set `DATA_SOURCE=postgres` in `apps/api/.env`, then run `npm run dev:api`. PostgreSQL defaults to real records; set `DATA_SET=demo` to view only the fictional seed. These datasets are never mixed in public queries. The local API listens at **http://127.0.0.1:3000**; `/health` reports storage. The database binds only to 127.0.0.1:54329. Its Compose credentials are disposable. The PostGIS image uses linux/amd64 emulation on Apple Silicon; remove that setting on amd64.
 
-To connect the frontend, set `VITE_DATA_SOURCE=api` and `VITE_API_URL=http://127.0.0.1:3000` in its environment and restart Vite. Ensure ALLOWED_ORIGINS includes the frontend origin. The database seed is idempotent and refreshes the dates of existing fictional records. No real collector is running.
+To connect the frontend, set `VITE_DATA_SOURCE=api` and `VITE_API_URL=http://127.0.0.1:3000` in its environment and restart Vite. Ensure ALLOWED_ORIGINS includes the frontend origin. The seed refreshes fictional dates idempotently. Run `npm run ingest` for real collection into PostgreSQL; `INGEST_PAGES=1` bounds a manual run. Production scheduling uses Cloudflare, independently of this CLI.
 
 API: incidents list/detail and statistics, strict spatial/date/category validation, bounded responses, opaque keyset pagination, structured logging, rate limiting and configured-origin CORS. Source/private/raw tables are excluded from public queries. See [API contract](docs/api.md) and [separate data-platform specification](docs/data-platform.md).
 
@@ -111,12 +114,14 @@ Production build generates manifest.webmanifest, sw.js and hashed static assets.
 
 An installation button appears when the browser exposes the install event; Safari uses Share → Add to Home Screen. Service worker updates prompt the user before refreshing. Share depends on browser support and a secure context; clipboard is the fallback.
 
-See [Cloudflare Workers deployment](docs/deployment.md) for the first release, repeatable publishing, SPA routing and cache headers. `npm run deploy:web` builds and uploads only the frontend using your existing Wrangler login. No API/database or paid infrastructure is provisioned by that command.
+See [Cloudflare Workers deployment](docs/deployment.md) for migrations, secrets, publishing, routing and cache headers. `npm run deploy` explicitly builds real API mode and uploads the Worker/assets using your Wrangler login. Apply migrations separately; deployment does not change your subscription. `deploy:web` is an alias for the same deployment.
 
-## Verification and next phase
+## Verification and remaining work
 
 Build, typecheck and lint commands are supplied. Unit/API tests cover bilingual data, composed filters, unknown event time fallback, statistics, pagination and API validation/CORS. The optional PostGIS test traverses all seeded events without duplicate pages and checks bounded-area totals. Browser checks should cover language changes, marker/cluster selection, category/time/search filters, sheets, details, themes and 320px layout.
 
 Lighthouse >90 Performance/Accessibility/Best Practices are product targets; they are not asserted without a measured deployment audit. Real geolocation permission, OS home-screen installation, Web Share and provider coverage should also be validated on physical target devices before release.
 
-The next independent phase is **one verified official collector** with preserved raw data, extraction/classification, cached geocoding, privacy review, provenance, deduplication and Ukrainian/English summaries. The detailed requirements and staged completion criteria are in [docs/data-platform.md](docs/data-platform.md). The API/database foundation alone does not meet the real-data MVP definition of done.
+The first real-data pipeline is deployed: official collector, private versioned originals, durable bounded queue, classification, cached city geocoding, safe bilingual metadata, provenance and exact deduplication. Uncertain places and possible fuzzy duplicates stay unpublished for review. Source checks run every ten minutes. Public `/api/v1/status` reports coverage and check times.
+
+Tests execute D1 SQL in SQLite and cover privacy gates, edits/retraction, leases, retries, retention, pagination/statistics and the Free-plan query budget. They use fictional fixtures without external requests. The optional PostGIS test validates the other adapter. Additional sources, broader geography, event-time extraction, fuller article summaries and an authenticated review/correction UI remain future work. See [docs/data-platform.md](docs/data-platform.md).

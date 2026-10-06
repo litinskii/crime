@@ -60,6 +60,24 @@ export class ApiIncidentsRepository implements IncidentsRepository {
     );
   }
 }
+export interface SourceStatus {
+  mode: "live";
+  sources: {
+    name: string;
+    url: string;
+    last_success_at: string | null;
+    last_failure_at: string | null;
+  }[];
+  total: number;
+}
+export async function getSourceStatus(
+  signal?: AbortSignal,
+): Promise<SourceStatus> {
+  const origin = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+  const response = await fetch(`${origin}/api/v1/status`, { signal });
+  if (!response.ok) throw new Error(`API ${response.status}`);
+  return response.json();
+}
 export const isDemo = import.meta.env.VITE_DATA_SOURCE !== "api";
 export const incidentsRepository: IncidentsRepository = isDemo
   ? new MockIncidentsRepository()

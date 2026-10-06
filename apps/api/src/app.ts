@@ -49,7 +49,10 @@ export async function createApp(
         max: 10,
         statement_timeout: 5000,
       });
-      repository = new PostgresIncidentsRepository(pool);
+      repository = new PostgresIncidentsRepository(
+        pool,
+        process.env.DATA_SET === "demo" ? "demo" : "real",
+      );
       app.addHook("onClose", async () => {
         await pool?.end();
       });
@@ -73,7 +76,11 @@ export async function createApp(
   });
   app.get("/health", async () => {
     if (pool) await pool.query("SELECT 1");
-    return { status: "ok", storage: source, ingestion: "not-configured" };
+    return {
+      status: "ok",
+      storage: source,
+      ingestion: source === "postgres" ? "manual-cli" : "not-configured",
+    };
   });
   app.get("/api/v1/incidents", async (request, reply) => {
     const parsed = querySchema.safeParse(request.query);

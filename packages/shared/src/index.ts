@@ -84,6 +84,10 @@ export const cities = [
   { uk: "Чернігів", en: "Chernihiv", lat: 51.4982, lng: 31.2893 },
   { uk: "Полтава", en: "Poltava", lat: 49.5883, lng: 34.5514 },
 ];
+export const locationCities = [
+  ...cities,
+  { uk: "Луцьк", en: "Lutsk", lat: 50.7472, lng: 25.3254 },
+];
 const templates: Record<
   IncidentCategory,
   {

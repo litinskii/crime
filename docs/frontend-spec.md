@@ -27,6 +27,6 @@ The data-platform spec correctly permits unknown occurredAt, although the initia
 
 ## Delivery boundary
 
-The current frontend implements the core prototype and works on 270 fictional bilingual events. It is deployed on Cloudflare Workers Static Assets. Address search defaults to city-only fixtures until a normalized geocoding provider is configured. Custom date range is capped to the API's 366-day window. Live incident providers, real ingestion and tracking providers are outside this phase.
+The frontend retains 270 fictional bilingual events for local demo mode. Production now queries the real-data API in the same Cloudflare Worker; see [data-platform.md](data-platform.md). City search supports 11 city names. Custom intervals are capped to 366 days. Live coverage/check time and city-centre precision are visible. Country overview fits the available viewport on mobile. Tracking stays disabled.
 
 Type/lint/build/tests and browser checks are part of verification. Production PWA shell and offline loading can be tested on localhost preview; physical phone installation, permission prompts, sharing and measured Lighthouse scores remain release verification tasks. See README for current commands and constraints.

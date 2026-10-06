@@ -4,7 +4,7 @@
   "demoNote": "Fictional incidents for product preview. These are not real reports.",
   "search": "Search a place",
   "searchPlaceholder": "City, district or address",
-  "searchCityOnly": "Demo search supports 10 Ukrainian cities. Street search can be connected through the geocoding service.",
+  "searchCityOnly": "Search supports 11 Ukrainian cities. Street search is not available yet.",
   "noPlaces": "No matching places",
   "filters": "Filters",
   "settings": "Settings",
@@ -90,5 +90,9 @@
   "ukraine": "Ukraine",
   "recent": "Recent incidents",
   "viewMap": "Explore the map",
-  "dateRange": "{{from}} – {{to}}"
+  "dateRange": "{{from}} – {{to}}",
+  "liveReports": "Official reports",
+  "liveCoverage": "One police source, partial coverage. Markers show city centres, not incident sites.",
+  "dataUpdated": "Source checked: {{date}}",
+  "cityCentre": "Centre of the mentioned city — the incident site is unknown"
 }

@@ -89,6 +89,24 @@ export default function IncidentMap(props: Props) {
         west: Math.max(-180, b.getWest()),
       });
     };
+    const showUkraine = (duration = 0) =>
+      map.fitBounds(
+        [
+          [22, 44],
+          [40, 53],
+        ],
+        {
+          padding: {
+            top: Math.min(215, map.getContainer().clientHeight * 0.25),
+            bottom: Math.min(260, map.getContainer().clientHeight * 0.3),
+            left: 24,
+            right: 56,
+          },
+          duration: matchMedia("(prefers-reduced-motion: reduce)").matches
+            ? 0
+            : duration,
+        },
+      );
     const layers = () => {
       if (map.getSource("incidents")) return;
       map.addSource("incidents", {
@@ -196,6 +214,7 @@ export default function IncidentMap(props: Props) {
     };
     map.on("style.load", layers);
     map.on("load", () => {
+      if (!current.current.center) showUkraine();
       bounds();
       setError(null);
     });
@@ -241,7 +260,7 @@ export default function IncidentMap(props: Props) {
     current.current.onReady({
       zoomIn: () => map.zoomIn(),
       zoomOut: () => map.zoomOut(),
-      home: () => map.flyTo({ center: [31.2, 48.4], zoom: 5 }),
+      home: () => showUkraine(450),
       goTo: (place) =>
         map.flyTo({
           center: [place.longitude, place.latitude],

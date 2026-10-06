@@ -1,4 +1,8 @@
-import { cities, type LocalizedText, type Locale } from "@crime-radar/shared";
+import {
+  locationCities,
+  type LocalizedText,
+  type Locale,
+} from "@crime-radar/shared";
 export const localized = (
   value: Partial<LocalizedText> | undefined,
   locale: string,
@@ -17,7 +21,7 @@ export interface GeocodingService {
 class LocalGeocodingService implements GeocodingService {
   async search(query: string): Promise<LocationResult[]> {
     const term = query.trim().toLocaleLowerCase();
-    return cities
+    return locationCities
       .filter(
         (c) => !term || `${c.uk} ${c.en}`.toLocaleLowerCase().includes(term),
       )

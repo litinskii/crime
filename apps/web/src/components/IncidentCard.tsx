@@ -63,7 +63,13 @@ export function IncidentCard({
         </span>
       </div>
       {incident.location.approximate && (
-        <p className="subtle small">{t("approximate")}</p>
+        <p className="subtle small">
+          {t(
+            incident.location.precision === "city"
+              ? "cityCentre"
+              : "approximate",
+          )}
+        </p>
       )}
       <p className="incident-description">
         {localized(incident.description, locale)}

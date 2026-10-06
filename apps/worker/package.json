@@ -1,0 +1,15 @@
+{
+  "name": "@crime-radar/worker",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@crime-radar/shared": "*",
+    "cheerio": "^1.2.0",
+    "zod": "^4.1.12"
+  }
+}

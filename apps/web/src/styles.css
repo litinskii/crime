@@ -250,7 +250,8 @@ input::placeholder {
   margin-top: 12px;
 }
 .country-pill,
-.demo-pill {
+.demo-pill,
+.live-pill {
   border-radius: 8px;
   padding: 7px 10px;
   font-size: 11px;
@@ -270,6 +271,14 @@ input::placeholder {
 .demo-pill {
   background: #fff3ce;
   color: #88681e;
+}
+.live-pill {
+  background: #e5f2eb;
+  color: #176b53;
+}
+.updated-caption {
+  display: block;
+  margin-top: 3px;
 }
 .map-mode {
   position: absolute;

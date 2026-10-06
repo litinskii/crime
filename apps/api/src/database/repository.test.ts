@@ -4,7 +4,7 @@ import { PostgresIncidentsRepository } from "./repository";
 describe.skipIf(!process.env.TEST_DATABASE_URL)("PostGIS integration", () => {
   it("queries public bounds and traverses stable cursors without duplicate rows", async () => {
     const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
-    const repository = new PostgresIncidentsRepository(pool);
+    const repository = new PostgresIncidentsRepository(pool, "demo");
     const q = {
       north: 53,
       south: 44,

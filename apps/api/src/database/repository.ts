@@ -9,13 +9,16 @@ import {
   type IncidentsRepository,
   type IncidentStatistics,
 } from "@crime-radar/shared";
-export function where(q: IncidentQuery) {
+export function where(q: IncidentQuery, mode: "real" | "demo" = "real") {
   const values: unknown[] = [q.west, q.south, q.east, q.north, q.from, q.to];
   const clauses = [
     "public_location && ST_MakeEnvelope($1,$2,$3,$4,4326)",
     "COALESCE(occurred_at,reported_at,published_at) >= $5::timestamptz",
     "COALESCE(occurred_at,reported_at,published_at) <= $6::timestamptz",
     "is_published = true",
+    mode === "demo"
+      ? "public_data->>'synthetic'='true'"
+      : "COALESCE(public_data->>'synthetic','false')<>'true'",
   ];
   if (q.categories?.length) {
     values.push(q.categories);
@@ -35,9 +38,12 @@ export function where(q: IncidentQuery) {
   return { text: clauses.join(" AND "), values };
 }
 export class PostgresIncidentsRepository implements IncidentsRepository {
-  constructor(readonly pool: Pool) {}
+  constructor(
+    readonly pool: Pool,
+    readonly mode: "real" | "demo" = "real",
+  ) {}
   async getIncidents(q: IncidentQuery): Promise<IncidentResponse> {
-    const w = where(q),
+    const w = where(q, this.mode),
       limit = q.limit ?? 500;
     const pageValues = [...w.values];
     let after = "";
@@ -67,14 +73,14 @@ export class PostgresIncidentsRepository implements IncidentsRepository {
   }
   async getIncident(id: string): Promise<Incident> {
     const result = await this.pool.query<{ public_data: Incident }>(
-      "SELECT public_data FROM incidents WHERE id=$1 AND is_published=true",
+      `SELECT public_data FROM incidents WHERE id=$1 AND is_published=true AND ${this.mode === "demo" ? "public_data->>'synthetic'='true'" : "COALESCE(public_data->>'synthetic','false')<>'true'"}`,
       [id],
     );
     if (!result.rows[0]) throw new Error("Incident not found");
     return result.rows[0].public_data;
   }
   async getStatistics(q: IncidentQuery): Promise<IncidentStatistics> {
-    const w = where(q);
+    const w = where(q, this.mode);
     const counts = await this.pool.query<{
       category: Incident["category"];
       total: string;
@@ -88,11 +94,14 @@ export class PostgresIncidentsRepository implements IncidentsRepository {
     >;
     counts.rows.forEach((r) => (result[r.category] = Number(r.total)));
     const duration = Date.parse(q.to) - Date.parse(q.from);
-    const p = where({
-      ...q,
-      from: new Date(Date.parse(q.from) - duration - 1).toISOString(),
-      to: new Date(Date.parse(q.from) - 1).toISOString(),
-    });
+    const p = where(
+      {
+        ...q,
+        from: new Date(Date.parse(q.from) - duration - 1).toISOString(),
+        to: new Date(Date.parse(q.from) - 1).toISOString(),
+      },
+      this.mode,
+    );
     const previous = await this.pool.query<{ total: string }>(
       `SELECT COUNT(*) AS total FROM incidents WHERE ${p.text}`,
       p.values,

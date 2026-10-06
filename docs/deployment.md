@@ -1,36 +1,61 @@
 # Cloudflare Workers deployment
 
-The first release serves the PWA with **fictional demo data** using Workers Static Assets. It does not publish the local API or database. Static asset requests are free and unlimited, with no additional asset-storage charge. Worker code execution has separate quotas/pricing; this release has no server-side Worker script. See [current billing and limitations](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/). A custom domain purchase and second-phase API/database are separate costs.
+The only production site is [crime-radar.w-siteee.workers.dev](https://crime-radar.w-siteee.workers.dev). `wrangler.jsonc` targets Worker **crime-radar** and D1 **crime-radar-data**. No Pages project is used. The Worker serves the PWA, same-origin API and ten-minute collector. The frontend never scrapes sources.
 
-## Publish from this repository
+## Publish
 
-Requires Node.js 22.12+ and an existing Cloudflare account. The project configuration is in `wrangler.jsonc`. Credentials remain in Wrangler's local configuration, outside this repository.
+Requires Node.js 22.16+, npm and an existing Wrangler login:
 
 ```sh
 npm ci
-npx wrangler whoami
-# Only if no existing login is available:
-npx wrangler login
-# Build and publish after the Git commit:
-npm run deploy:web
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npx wrangler d1 migrations apply crime-radar-data --remote
+npm run deploy
 ```
 
-For this first release use `VITE_DATA_SOURCE=mock` and an empty `VITE_API_URL`. Local `.env.local` overrides must be reviewed before publishing: Vite includes public configuration in browser assets. Publish from the verified `main` branch. `wrangler deploy` updates production; it is not a branch-preview command. Upload output is `apps/web/dist/`, not the repository or API source.
+`npm run deploy` builds with `VITE_DATA_SOURCE=api` and empty `VITE_API_URL`, overriding local mock configuration, then uploads Worker code and `apps/web/dist/`. `deploy:web` is an alias. Apply reviewed D1 migrations separately. Deployment changes production immediately but does not change the subscription.
 
-Publishing uses existing Wrangler CLI authentication. Pushing GitHub triggers the verification workflow; deployment is a separate `npm run deploy:web` step. For automatic deployment later, connect Workers Builds to this GitHub repository or add a GitHub Actions deployment job with a scoped account token stored as a repository secret. See [Workers GitHub Actions](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
+The D1 binding contains a public database identifier, not credentials. An independently owned clone must create its own D1 database and update the binding. Credentials stay in Wrangler configuration. GitHub Actions verifies pushes; deployments are manual from the verified branch.
 
-The production address is [crime-radar.w-siteee.workers.dev](https://crime-radar.w-siteee.workers.dev). It is hosted by Cloudflare, while GitHub stores the source. The repository's configuration and publish command target only Workers.
+## Protected manual ingestion
 
-## Routing, headers and updates
+Cron needs no external credentials. Manual collection requires `INGESTION_SECRET` in Workers Secrets. Use a random key of at least 32 characters and set it with `npx wrangler secret put INGESTION_SECRET`. Never put it in a Vite variable or command argument. This checkout keeps its matching key in ignored `.env.ingestion`, readable only by its owner. The file contains only the key, not dotenv syntax.
 
-The `_redirects` rule `/incident/* / 200` serves the root app shell for incident links while keeping the address unchanged. `assets.not_found_handling = "none"` preserves real 404 responses for missing assets and API URLs instead of returning HTML. This avoids caching HTML under a missing JavaScript asset name. See [Workers static redirects](https://developers.cloudflare.com/workers/static-assets/redirects/).
+```sh
+npm run ingest:worker
+# Initial backfill, one page per request with pauses:
+npm run ingest:worker -- --pages=5
+# Drain persisted work, stopping when no pending work remains:
+npm run ingest:worker -- --runs=20
+# One specific older page:
+npm run ingest:worker -- --before=78627
+```
 
-Vite copies `_headers` and `_redirects` from `apps/web/public/` into the release. Hashed `/assets/*` files receive immutable caching; HTML, service worker and manifest revalidate. Camera/microphone permissions are disabled and geolocation is limited to this origin, where the UI requests it only after a tap.
+The CLI reads the environment or private local file. `WORKER_URL` can target another owned deployment. Outputs contain counts and public numeric cursors, never originals or secrets. Manual requests and cron share a source lease; overlapping runs are skipped.
 
-After upload, verify HTTPS, the map, a direct incident link, manifest/icons, missing-asset 404 responses and cache headers. Load once online before checking the offline shell. Map tiles are not guaranteed offline. Physical phone installation/Web Share and Lighthouse are separate release checks; scores are not claimed without an audit.
+Each run stages an entire page and processes at most three items. Pending work persists even when posts leave the newest page. Multi-row statements and a maximum 30-item source page bound D1 queries; a test exercises the 50-query Free limit. Changed layouts or larger pages stop collection. Failed items retry at most three times; edits reset attempts. Original text/versions expire after 90 days. Indexed retention scans remove old job/run history too.
 
-## Release verification
+## Quotas
 
-Open `/`, refresh a direct `/incident/demo-0001` link, inspect the manifest and icons, and install from HTTPS. Load the application once, disconnect, and verify the shell and fictional demo data. API responses have a five-minute network-first cache; base map tiles are not precached and are not guaranteed offline. Reconnect and accept the update prompt for a new service worker.
+Static assets have a [free/unlimited request allowance](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/). Dynamic Worker/API code has [separate quotas](https://developers.cloudflare.com/workers/platform/pricing/). D1 Free includes 5 million rows read/day, 100,000 written/day and 5 GB total account storage; each database is limited to 500 MB. Exhausted daily quotas block queries until reset rather than upgrading the account. Indexes reduce reads but count towards writes. See [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) and [D1 limits](https://developers.cloudflare.com/d1/platform/limits/). No paid-plan change is part of this deployment.
 
-Check browser console, map provider terms/capacity, and Lighthouse on the deployed HTTPS build. The requested >90 Lighthouse scores are targets, not claimed measurements. The MapLibre engine and worker are intentionally separate lazy chunks.
+## Local Worker
+
+```sh
+npm run build:production
+npx wrangler d1 migrations apply crime-radar-data --local
+npx wrangler dev --port 8787
+```
+
+Local D1 is separate and empty by default. Use the PostGIS collector/API in the README for the alternative adapter. SQLite integration tests use fictional records in memory and need no Cloudflare account.
+
+## Routing, cache and verification
+
+Only `/api/*`, `/internal/*` and `/health` run code before asset routing. `_redirects` rewrites `/incident/*` to the app shell; missing assets keep real 404 responses. Hashed assets are immutable; HTML/SW/manifest revalidate. API JSON is `no-store`; the PWA has a bounded five-minute network-first cache. Camera/microphone are disabled; geolocation is requested after a tap.
+
+After publishing check health/status, filtered incidents, statistics, detail and direct incident links. Unauthorized collection must return 401, unknown private/API routes 404 and invalid queries 400. Check both languages and 320px layout. Existing installations may need to accept the service-worker update prompt. Source failure retains published records and separate last success/failure times.
+
+Physical installation, geolocation permission, Web Share, offline map tiles and Lighthouse require separate device/audit checks. No unmeasured score is claimed.
