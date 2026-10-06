@@ -78,7 +78,6 @@ export default {
           !source ||
           !["ukrinform-regions", "zaxid-news"].includes(source.id) ||
           !Array.isArray(input.urls) ||
-          input.urls.length < 1 ||
           input.urls.length > 3 ||
           !input.urls.every(
             (u) => typeof u === "string" && allowedArticle(source, u) === u,

@@ -62,7 +62,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
       phase = "fetch-keys";
       const response = await fetch(`${issuer}/.well-known/jwks`, {
         signal: AbortSignal.timeout(10000),
-        redirect: "error",
+        redirect: "manual",
       });
       if (!response.ok) return reject(`keys-http-${response.status}`);
       const data = (await response.json()) as {
@@ -96,7 +96,7 @@ export async function authorizedHarvester(request: Request): Promise<boolean> {
     );
   } catch (error) {
     return reject(
-      `${phase}:${error instanceof Error ? error.name : "verification-error"}`,
+      `${phase}:${error instanceof Error ? error.name : "verification-error"}${phase === "fetch-keys" && error instanceof Error ? `:${error.message.slice(0, 160)}` : ""}`,
     );
   }
 }

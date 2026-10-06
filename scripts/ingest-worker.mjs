@@ -13,6 +13,13 @@ const source = process.argv
   .find((arg) => arg.startsWith("--source="))
   ?.slice(9);
 if (source) url.searchParams.set("source", source);
+const drain = process.argv.includes("--drain");
+if (drain) {
+  if (!["zaxid-news", "ukrinform-regions"].includes(source))
+    throw new Error("Drain requires a registered article source");
+  url.pathname = "/internal/articles";
+  url.search = "";
+}
 const page = process.argv.find((arg) => arg.startsWith("--page="))?.slice(7);
 if (page) url.searchParams.set("page", page);
 if (before) {
@@ -39,7 +46,11 @@ for (let i = 0; i < Math.max(pages, runs); i++) {
   if (i) await new Promise((resolve) => setTimeout(resolve, 2000));
   const response = await fetch(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${secret}` },
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      "Content-Type": "application/json",
+    },
+    body: drain ? JSON.stringify({ source, urls: [] }) : undefined,
     signal: AbortSignal.timeout(60000),
   });
   const body = await response.json().catch(() => {
