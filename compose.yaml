@@ -1,0 +1,19 @@
+services:
+  database:
+    image: postgis/postgis:16-3.5
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: crime
+      POSTGRES_PASSWORD: crime_local_only
+      POSTGRES_DB: crime_radar
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - crime-radar-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crime -d crime_radar"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  crime-radar-db:

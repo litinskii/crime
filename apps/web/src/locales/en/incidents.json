@@ -1,0 +1,13 @@
+{
+  "category": {
+    "violence": "Violence",
+    "theft": "Theft",
+    "robbery": "Robbery",
+    "fraud": "Fraud",
+    "drugs": "Drugs",
+    "weapons": "Weapons",
+    "traffic": "Traffic",
+    "fire": "Fire",
+    "other": "Other"
+  }
+}

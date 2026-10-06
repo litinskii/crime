@@ -1,0 +1,35 @@
+{
+  "name": "@crime-radar/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@crime-radar/shared": "*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.3",
+    "maplibre-gl": "^6.12.0",
+    "zustand": "^5.0.8",
+    "@tanstack/react-query": "^5.90.2",
+    "i18next": "^25.5.2",
+    "react-i18next": "^16.0.0",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.544.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.9",
+    "@vitejs/plugin-react": "^5.0.4",
+    "vite-plugin-pwa": "^1.0.3",
+    "tailwindcss": "^4.1.14",
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/geojson": "^7946.0.16"
+  }
+}

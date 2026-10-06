@@ -1,0 +1,35 @@
+{
+  "name": "crime-radar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @crime-radar/web",
+    "dev:api": "npm run dev -w @crime-radar/api",
+    "build": "npm run build --workspaces --if-present",
+    "build:web": "npm run build -w @crime-radar/web",
+    "deploy:web": "npm run build:web && wrangler pages deploy",
+    "preview": "npm run preview -w @crime-radar/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "db:migrate": "npm run db:migrate -w @crime-radar/api",
+    "db:seed": "npm run db:seed -w @crime-radar/api",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/node": "^22.18.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^5.0.3",
+    "wrangler": "^4.147.0"
+  }
+}
