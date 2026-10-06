@@ -1,5 +1,7 @@
 # Crime Radar
 
+Live demo: [crime-radar.w-siteee.workers.dev](https://crime-radar.w-siteee.workers.dev).
+
 Mobile-first bilingual PWA for exploring **publicly reported incidents in Ukraine**. The map is the main interface; incident density is not a measure of personal danger or crime probability.
 
 Built from the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). The first release is a working product prototype with fictional data and an independently runnable API/database foundation. **Live source collectors and real incident ingestion are not implemented or enabled.** The frontend uses Cloudflare Workers Static Assets; the API is deployed separately in the next phase.
@@ -46,7 +48,7 @@ The production frontend is **apps/web/dist/**. Its service worker is generated d
 apps/web/        React + TypeScript + Vite PWA
 apps/api/        Fastify API + PostgreSQL/PostGIS foundation
 packages/shared Types, fictional fixtures, filtering and cursor utilities
-docs/           API contract, Cloudflare/AWS hosting and data-platform requirements
+docs/           API contract, Cloudflare hosting and data-platform requirements
 ```
 
 Frontend: React Router, Zustand, TanStack Query, Tailwind CSS, date-fns, i18next/react-i18next, MapLibre GL JS and vite-plugin-pwa. Icons use Lucide plus compact vector-derived map pictograms. There is no authentication, payment flow, admin UI or social functionality.
@@ -109,7 +111,7 @@ Production build generates manifest.webmanifest, sw.js and hashed static assets.
 
 An installation button appears when the browser exposes the install event; Safari uses Share → Add to Home Screen. Service worker updates prompt the user before refreshing. Share depends on browser support and a secure context; clipboard is the fallback.
 
-See [Cloudflare Workers deployment](docs/deployment.md) for the first release, repeatable publishing, SPA routing and cache headers. The same guide preserves S3 + CloudFront as an alternative. `npm run deploy:web` builds and uploads only the frontend using your existing Wrangler login. No API/database or paid infrastructure is provisioned by that command.
+See [Cloudflare Workers deployment](docs/deployment.md) for the first release, repeatable publishing, SPA routing and cache headers. `npm run deploy:web` builds and uploads only the frontend using your existing Wrangler login. No API/database or paid infrastructure is provisioned by that command.
 
 ## Verification and next phase
 

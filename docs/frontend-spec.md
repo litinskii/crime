@@ -19,7 +19,7 @@ Ukraine, mobile-first 320–480px, map as the primary interface, larger screen s
 - Mock/API repositories behind VITE_DATA_SOURCE, localized records, multiple sources and nullable event dates.
 - Installable PWA, manifest/icons/worker, offline shell, bounded incident-data caching, and update prompt.
 - Offline, no results, API/map failure and location denial states.
-- Static build and S3/CloudFront deployment documentation. No ingestion in the browser.
+- Static build deployed with Cloudflare Workers, as selected by the owner. No ingestion in the browser.
 
 ## Shared model clarification
 
@@ -27,6 +27,6 @@ The data-platform spec correctly permits unknown occurredAt, although the initia
 
 ## Delivery boundary
 
-The current frontend implements the core prototype and works on 270 fictional bilingual events. Address search defaults to city-only fixtures until a normalized geocoding provider is configured. Custom date range is capped to the API's 366-day window. Live incident providers, real ingestion, hosting resources, tracking providers and accounts are outside this phase.
+The current frontend implements the core prototype and works on 270 fictional bilingual events. It is deployed on Cloudflare Workers Static Assets. Address search defaults to city-only fixtures until a normalized geocoding provider is configured. Custom date range is capped to the API's 366-day window. Live incident providers, real ingestion and tracking providers are outside this phase.
 
 Type/lint/build/tests and browser checks are part of verification. Production PWA shell and offline loading can be tested on localhost preview; physical phone installation, permission prompts, sharing and measured Lighthouse scores remain release verification tasks. See README for current commands and constraints.
