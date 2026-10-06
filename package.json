@@ -12,7 +12,7 @@
     "dev:api": "npm run dev -w @crime-radar/api",
     "build": "npm run build --workspaces --if-present",
     "build:web": "npm run build -w @crime-radar/web",
-    "deploy:web": "npm run build:web && wrangler pages deploy",
+    "deploy:web": "npm run build:web && wrangler deploy",
     "preview": "npm run preview -w @crime-radar/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",

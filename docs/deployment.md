@@ -1,6 +1,6 @@
-# Cloudflare Pages deployment
+# Cloudflare Workers deployment
 
-The first release serves the PWA with **fictional demo data**. It does not publish the local API or database. Cloudflare Pages' static Free plan supports 500 builds/month, 20,000 files and 25 MiB per file; static requests/bandwidth are unlimited. Functions use separate Workers quotas. See [current limits](https://developers.cloudflare.com/pages/platform/limits/) and [Pages overview](https://www.cloudflare.com/products/pages/). A custom domain purchase and second-phase API/database are separate costs.
+The first release serves the PWA with **fictional demo data** using Workers Static Assets. It does not publish the local API or database. Static asset requests are free and unlimited, with no additional asset-storage charge. Worker code execution has separate quotas/pricing; this release has no server-side Worker script. See [current billing and limitations](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/). A custom domain purchase and second-phase API/database are separate costs.
 
 ## Publish from this repository
 
@@ -11,21 +11,21 @@ npm ci
 npx wrangler whoami
 # Only if no existing login is available:
 npx wrangler login
-# One-time setup for a new project:
-npx wrangler pages project create crime-radar-litinskii --production-branch main --force
 # Build and publish after the Git commit:
 npm run deploy:web
 ```
 
-For this first release use `VITE_DATA_SOURCE=mock` and an empty `VITE_API_URL`. Local `.env.local` overrides must be reviewed before publishing: Vite includes public configuration in browser assets. Uploads target the production branch `main`; deployments from other branches are previews. Upload output is `apps/web/dist/`, not the repository or API source.
+For this first release use `VITE_DATA_SOURCE=mock` and an empty `VITE_API_URL`. Local `.env.local` overrides must be reviewed before publishing: Vite includes public configuration in browser assets. Publish from the verified `main` branch. `wrangler deploy` updates production; it is not a branch-preview command. Upload output is `apps/web/dist/`, not the repository or API source.
 
-This is a **Direct Upload** project using existing CLI authentication. Pushing GitHub triggers the verification workflow; deployment is a separate `npm run deploy:web` step. Cloudflare does not allow converting a Direct Upload project to Git integration. For automatic uploads later, add a GitHub Actions deployment job with an account-specific Pages token stored as a repository secret, or create a separate Git-integrated project. See [Direct Upload CI](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/).
+Publishing uses existing Wrangler CLI authentication. Pushing GitHub triggers the verification workflow; deployment is a separate `npm run deploy:web` step. For automatic deployment later, connect Workers Builds to this GitHub repository or add a GitHub Actions deployment job with a scoped account token stored as a repository secret. See [Workers GitHub Actions](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/).
 
-The one-time `--force` flag selects Pages directly in recent Wrangler versions which otherwise try to create a Worker and detect an application at the workspace root. Here it selects the hosting product; it does not overwrite an existing project. Once the Pages project exists, normal deployments do not need this flag.
+The resulting address uses `<worker>.<account-subdomain>.workers.dev`. It is hosted by Cloudflare, while GitHub stores the source. An earlier trial Pages upload exists separately; the repository's current configuration and publish command target Workers.
 
 ## Routing, headers and updates
 
-Vite copies `_headers`, `_redirects` and `404.html` from `apps/web/public/` into the release. `/incident/*` rewrites to `index.html` with status 200. The explicit 404 page prevents missing asset/API URLs from being rewritten into HTML. Hashed `/assets/*` files receive immutable caching; HTML, service worker and manifest revalidate. Camera/microphone permissions are disabled and geolocation is limited to this origin, where the UI requests it only after a tap.
+Workers uses `assets.not_found_handling = "single-page-application"` to serve the app shell for browser navigation, including direct incident links. Future API routes need explicit routing so they do not receive the SPA shell. See [SPA routing](https://developers.cloudflare.com/workers/static-assets/routing/single-page-application/).
+
+Vite copies `_headers` from `apps/web/public/` into the release. Hashed `/assets/*` files receive immutable caching; HTML, service worker and manifest revalidate. Camera/microphone permissions are disabled and geolocation is limited to this origin, where the UI requests it only after a tap.
 
 After upload, verify HTTPS, the map, a direct incident link, manifest/icons, missing-asset 404 responses and cache headers. Load once online before checking the offline shell. Map tiles are not guaranteed offline. Physical phone installation/Web Share and Lighthouse are separate release checks; scores are not claimed without an audit.
 
@@ -62,7 +62,7 @@ aws s3 sync apps/web/dist/ s3://YOUR_BUCKET/ --exclude "assets/*" --cache-contro
 aws cloudfront create-invalidation --distribution-id YOUR_DISTRIBUTION --paths /index.html /sw.js /manifest.webmanifest '/workbox-*'
 ```
 
-Upload the hashed assets **before** updating HTML in an actual release. Keep older asset versions during the rollout so tabs and installed PWAs can finish loading them. No AWS infrastructure has been created by this repository. Exclude the Cloudflare-specific `_headers`, `_redirects` and `404.html` from the AWS upload if you only use the CloudFront route function.
+Upload the hashed assets **before** updating HTML in an actual release. Keep older asset versions during the rollout so tabs and installed PWAs can finish loading them. No AWS infrastructure has been created by this repository. Exclude the Cloudflare-specific `_headers` file from the AWS upload.
 
 ## Release verification
 

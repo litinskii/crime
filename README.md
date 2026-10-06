@@ -2,7 +2,7 @@
 
 Mobile-first bilingual PWA for exploring **publicly reported incidents in Ukraine**. The map is the main interface; incident density is not a measure of personal danger or crime probability.
 
-Built from the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). The first release is a working product prototype with fictional data and an independently runnable API/database foundation. **Live source collectors and real incident ingestion are not implemented or enabled.** The frontend is prepared for Cloudflare Pages; the API is deployed separately in the next phase.
+Built from the [supplied product discussion](https://chatgpt.com/share/6ac4b304-f5c4-83eb-b575-d3658a0105d6). The first release is a working product prototype with fictional data and an independently runnable API/database foundation. **Live source collectors and real incident ingestion are not implemented or enabled.** The frontend uses Cloudflare Workers Static Assets; the API is deployed separately in the next phase.
 
 ## Quick start
 
@@ -109,7 +109,7 @@ Production build generates manifest.webmanifest, sw.js and hashed static assets.
 
 An installation button appears when the browser exposes the install event; Safari uses Share → Add to Home Screen. Service worker updates prompt the user before refreshing. Share depends on browser support and a secure context; clipboard is the fallback.
 
-See [Cloudflare Pages deployment](docs/deployment.md) for the first release, repeatable publishing, SPA routing and cache headers. The same guide preserves S3 + CloudFront as an alternative. `npm run deploy:web` builds and uploads only the frontend using your existing Wrangler login. No API/database or paid infrastructure is provisioned by that command.
+See [Cloudflare Workers deployment](docs/deployment.md) for the first release, repeatable publishing, SPA routing and cache headers. The same guide preserves S3 + CloudFront as an alternative. `npm run deploy:web` builds and uploads only the frontend using your existing Wrangler login. No API/database or paid infrastructure is provisioned by that command.
 
 ## Verification and next phase
 
