@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchText,
   parsePolicePage,
   parseTelegramPage,
   PoliceTelegramCollector,
@@ -34,6 +35,33 @@ function mockPages(pages: Record<string, string>, robots?: string) {
   return fetchMock;
 }
 afterEach(() => vi.unstubAllGlobals());
+
+describe("source content negotiation", () => {
+  it("accepts RSS from a publisher XML route requiring a generic MIME fallback", async () => {
+    const url = "https://lb.ua/rss/ukr/society.xml";
+    const xml = "<rss><channel><title>Суспільство</title></channel></rss>";
+    const rssServer = vi.fn(
+      async (value: string | URL | Request, init?: RequestInit) => {
+        if (String(value) !== url) throw new Error("Unexpected source URL");
+        const offers = (new Headers(init?.headers).get("Accept") ?? "")
+          .split(",")
+          .map((offer) => offer.trim().toLowerCase().split(";")[0]);
+        // LB's XML route also requires a generic fallback despite returning
+        // application/rss+xml. The finite old Accept list reproduces HTTP 406.
+        return offers.includes("application/rss+xml") && offers.includes("*/*")
+          ? new Response(xml, {
+              status: 200,
+              headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+            })
+          : new Response("Not Acceptable", { status: 406 });
+      },
+    );
+    vi.stubGlobal("fetch", rssServer);
+
+    expect(await fetchText(url)).toEqual({ status: 200, text: xml });
+    expect(rssServer).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("configured Telegram provenance", () => {
   it("isolates channel IDs, source IDs and timestamps in mixed pages", async () => {

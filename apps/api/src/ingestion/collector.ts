@@ -19,7 +19,8 @@ export async function fetchText(
       response = await fetch(url, {
         headers: {
           "User-Agent": agent,
-          Accept: "text/html,application/xml,text/plain,application/rtf",
+          Accept:
+            "text/html,application/rss+xml,application/xml,text/xml,text/plain,application/rtf,*/*;q=0.1",
         },
         signal: signal
           ? AbortSignal.any([signal, AbortSignal.timeout(15000)])
