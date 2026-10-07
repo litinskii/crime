@@ -89,6 +89,8 @@ export default {
           return json({ error: "Invalid JSON" }, 400);
         }
         const source = input && sourceById(input.source ?? "");
+        if (source?.enabled === false)
+          return json({ error: "Source is archived; ingestion disabled" }, 410);
         if (
           !source ||
           !["ukrinform-regions", "zaxid-news"].includes(source.id) ||
@@ -115,6 +117,8 @@ export default {
           !(await authorizedHarvester(request))
         )
           return json({ error: "Unauthorized" }, 401);
+        if (sourceById("court-decisions")?.enabled === false)
+          return json({ error: "Source is archived; ingestion disabled" }, 410);
         const body = await request.text();
         if (body.length > 20000)
           return json({ error: "Payload too large" }, 413);
@@ -170,6 +174,8 @@ export default {
         const sourceId = url.searchParams.get("source") ?? policeSource.id;
         const source = sourceById(sourceId);
         if (!source) return json({ error: "Invalid source" }, 400);
+        if (source.enabled === false)
+          return json({ error: "Source is archived; ingestion disabled" }, 410);
         const page = url.searchParams.has("page")
           ? Number(url.searchParams.get("page"))
           : undefined;

@@ -10,6 +10,7 @@ parser.add_argument('--limit',type=int,default=1000)
 parser.add_argument('--state',default='.court-harvest-state.json')
 parser.add_argument('--dry-run',action='store_true')
 args=parser.parse_args()
+parser.exit(message='Court ingestion is disabled; historical map cards are retained.\n')
 BASE=os.environ.get('WORKER_URL','https://crime-radar.w-siteee.workers.dev')
 HEADERS={'User-Agent':'CrimeRadar/0.3 (+https://crime-radar.w-siteee.workers.dev)'}
 def request_json(url):

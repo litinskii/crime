@@ -113,6 +113,116 @@ describe("source region geography hints", () => {
   it("leaves same-oblast homonyms ambiguous after adding smaller settlements", () => {
     expect(resolvePlace("У Рокитному", "У Рокитному", "19")).toBeNull();
   });
+  it("does not choose the city of Zaporizhzhia from the source's oblast alone", () => {
+    expect(resolvePlace("У Запоріжжі", "У Запоріжжі", "26")).toBeNull();
+  });
+  it.each(["У місті Запоріжжі", "місто Запоріжжя", "м. Запоріжжя"])(
+    "resolves Zaporizhzhia from an explicit city label: %s",
+    (text) => {
+      expect(resolvePlace(text, text, "26")).toMatchObject({
+        key: "geonames-687700",
+        latitude: 47.85167,
+        longitude: 35.11714,
+      });
+    },
+  );
+  it("uses the urban district in a representative 061 traffic report", () => {
+    const title = "У Запоріжжі пʼяний водій спровокував ДТП";
+    const body =
+      "У Шевченківському районі Запоріжжя водій ВАЗ під час розʼїзду з автомобілем, який рухався назустріч, допустив зіткнення.";
+    expect(resolvePlace(title, body, "26")).toMatchObject({
+      key: "geonames-687700",
+    });
+    expect(placeAfterCue("Запоріжжі пʼяний водій", body, "26")).toMatchObject({
+      key: "geonames-687700",
+    });
+  });
+  it("publishes the district-located 061 report without treating the police announcement date as the event date", async () => {
+    const title = "У Запоріжжі пʼяний водій спровокував ДТП";
+    const content = `${title}\nУ Шевченківському районі Запоріжжя водій ВАЗ під час розʼїзду з автомобілем, який рухався назустріч, допустив зіткнення. Патрульні помітили ознаки спʼяніння, повідомили в обласній Патрульній поліції 6 жовтня.`;
+    const input = await raw(title, content);
+    const result = await new IncidentProcessor().process({
+      ...input,
+      sourceId: "zaporizhzhia-061",
+      externalId:
+        "https://www.061.ua/news/4163789/u-zaporizzi-panij-vodij-ziguliv-sprovokuvav-dtp",
+      sourceUrl:
+        "https://www.061.ua/news/4163789/u-zaporizzi-panij-vodij-ziguliv-sprovokuvav-dtp",
+      publishedAt: "2026-10-06T14:36:00Z",
+    });
+    expect(result.status).toBe("published");
+    if (result.status !== "published") throw new Error("Expected publication");
+    expect(result.incident.location).toMatchObject({
+      city: "Запоріжжя",
+      latitude: 47.85167,
+      longitude: 35.11714,
+    });
+    expect(result.incident.occurredOn).toBeUndefined();
+  });
+  it.each(["У селі Запоріжжя", "с. Запоріжжя", "У селищі Запоріжжя"])(
+    "does not replace an explicitly named village with the city: %s",
+    (title) => {
+      expect(resolvePlace(title, title, "26")).toBeNull();
+      expect(
+        resolvePlace(title, "У місті Запоріжжі поліція провела брифінг.", "26"),
+      ).toBeNull();
+    },
+  );
+  it("keeps an unverified district and separately named settlements ambiguous", () => {
+    expect(
+      resolvePlace(
+        "У Запоріжжі",
+        "У Невідомому районі Запоріжжя сталася ДТП.",
+        "26",
+      ),
+    ).toBeNull();
+    expect(
+      resolvePlace(
+        "У Запоріжжі та Києві",
+        "У Шевченківському районі Запоріжжя і в Києві сталися ДТП.",
+        "26",
+      ),
+    ).toBeNull();
+  });
+  it("does not treat an adjectival road name as a second settlement", () => {
+    const sentence =
+      "Увечері 2 жовтня у Дніпрі на перетині Донецького шосе та вулиці Незламної сталася ДТП.";
+    expect(resolvePlace(sentence, sentence, "04")).toMatchObject({
+      key: "geonames-709930",
+    });
+    expect(placeAfterCue("Донецького шосе", sentence, "04")).toBeNull();
+    expect(resolvePlace("На вулиці Донецького сталася ДТП.")).toBeNull();
+    expect(resolvePlace("У Донецькому")).toMatchObject({
+      key: "geonames-709713",
+    });
+    expect(resolvePlace("У Донецькому вулиці порожні.")).toMatchObject({
+      key: "geonames-709713",
+    });
+    expect(resolvePlace("У Дніпрі та Донецькому", sentence, "04")).toBeNull();
+  });
+  it("publishes a Dnipro traffic report with a street homonym and its own event date", async () => {
+    const title = "У Дніпрі п’яний водій спричинив ДТП";
+    const content = `${title}\nУвечері 2 жовтня у Дніпрі на перетині Донецького шосе та вулиці Незламної сталася ДТП. Про це повідомляє “Дніпро Оперативний”.`;
+    const result = await new IncidentProcessor().process({
+      ...(await raw(title, content)),
+      sourceId: "dnepr-news",
+      sourceUrl: "https://dnepr.express/ua/post/dtp-u-dnipri",
+      publishedAt: "2026-10-03T10:10:00Z",
+    });
+    expect(result.status).toBe("published");
+    if (result.status !== "published") throw new Error("Expected publication");
+    expect(result.incident.location.city).toBe("Дніпро");
+    expect(result.incident.occurredOn).toBe("2026-10-02");
+  });
+  it("recognizes declined neuter adjectival names without choosing a same-oblast homonym", () => {
+    expect(resolvePlace("У Кам’янському")).toBeNull();
+    expect(
+      resolvePlace("У Кам’янському", "У Кам’янському", "17"),
+    ).toMatchObject({
+      key: "geonames-706947",
+    });
+    expect(resolvePlace("У Кам’янському", "У Кам’янському", "04")).toBeNull();
+  });
   it("requires regional evidence for Boratyn and distinguishes three homonyms", () => {
     expect(resolvePlace("У Боратині")).toBeNull();
     expect(resolvePlace("У Боратині", "У Боратині", "24")).toMatchObject({

@@ -1,22 +1,15 @@
-name: Update court reports
+name: Archived court reports (disabled)
 on:
-  schedule:
-    - cron: "40 5 * * *"
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/harvest-courts.yml"
-      - "scripts/harvest-courts.py"
-      - "apps/worker/src/oidc.ts"
 permissions:
   contents: read
-  id-token: write
 concurrency:
   group: court-harvest
   cancel-in-progress: false
 jobs:
   harvest:
+    # Historical cards remain on the map; further court imports are disabled.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:

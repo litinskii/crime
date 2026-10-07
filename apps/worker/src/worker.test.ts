@@ -245,6 +245,31 @@ describe("durable ingestion and public D1 API", () => {
       await store.failItem(saved.id, "processing-failed");
     expect(await store.stage([raw])).toEqual([]);
   });
+  it("renews unchanged originals daily without hourly D1 writes or new versions", async () => {
+    await store.begin(policeSource);
+    const raw = { ...(await item(1)), retrievedAt: "2026-10-04T06:00:00.000Z" };
+    await store.stage([raw]);
+    const changes = () =>
+      (
+        sqlite.sqlite.prepare("SELECT total_changes() AS n").get() as {
+          n: number;
+        }
+      ).n;
+    const before = changes();
+    await store.stage([{ ...raw, retrievedAt: "2026-10-04T07:00:00.000Z" }]);
+    expect(changes()).toBe(before);
+    const heartbeat = "2026-10-05T07:00:00.000Z";
+    await store.stage([{ ...raw, retrievedAt: heartbeat }]);
+    expect(changes()).toBe(before + 1);
+    expect(
+      sqlite.sqlite.prepare("SELECT retrieved_at FROM raw_source_items").get(),
+    ).toMatchObject({ retrieved_at: heartbeat });
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT COUNT(*) AS n FROM raw_source_item_versions")
+        .get(),
+    ).toMatchObject({ n: 1 });
+  });
   it("protects collection and exposes no private raw routes", async () => {
     const env: Env = {
       DB: sqlite.db,
@@ -287,7 +312,7 @@ describe("durable ingestion and public D1 API", () => {
     ).toBeGreaterThanOrEqual(3599000);
     expect((await repo.getIncidents(query)).total).toBe(1);
   });
-  it("withdraws court records and private versions when the official registry removes a document", async () => {
+  it("refuses archived court ingestion and preserves historical cards and provenance", async () => {
     const source = sourceById("court-decisions")!;
     const content =
       "Справа №123/456/26\nВСТАНОВИВ:\n01.09.2026 у м. Тернополі викрав велосипед.";
@@ -304,30 +329,52 @@ describe("durable ingestion and public D1 API", () => {
       (await ingest({ source, collect: async () => [original] }, store))
         ?.published,
     ).toBe(1);
-    const request = new Request("https://example.test/internal/court", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${"x".repeat(64)}` },
-      body: JSON.stringify({ documents: [], withdrawn: ["123"] }),
-    });
-    expect(
-      (
-        await worker.fetch(request, {
-          DB: sqlite.db,
-          ASSETS: { fetch: async () => new Response() },
-          INGESTION_SECRET: "x".repeat(64),
-        })
-      ).status,
-    ).toBe(200);
+    const env: Env = {
+      DB: sqlite.db,
+      ASSETS: { fetch: async () => new Response() },
+      INGESTION_SECRET: "x".repeat(64),
+    };
+    const queriesBefore = sqlite.queries;
+    for (const path of [
+      "/internal/court",
+      "/internal/ingest?source=court-decisions",
+      "/internal/ingest?source=court-decisions&drain=1",
+      "/internal/process?source=court-decisions",
+      "/internal/articles",
+    ]) {
+      const response = await worker.fetch(
+        new Request(`https://example.test${path}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${env.INGESTION_SECRET}` },
+          body: JSON.stringify({
+            source: source.id,
+            urls: [],
+            documents: [],
+            withdrawn: ["123"],
+          }),
+        }),
+        env,
+      );
+      expect(response.status).toBe(410);
+    }
+    // Disabled requests must not touch D1, even when they ask to withdraw cards.
+    expect(sqlite.queries).toBe(queriesBefore);
     expect(
       sqlite.sqlite
         .prepare("SELECT COUNT(*) AS n FROM incidents WHERE is_published=1")
         .get()?.n,
-    ).toBe(0);
+    ).toBe(1);
     expect(
       sqlite.sqlite
         .prepare("SELECT COUNT(*) AS n FROM raw_source_item_versions")
         .get()?.n,
-    ).toBe(0);
+    ).toBe(1);
+    const archived = await repo.getIncidents({
+      ...query,
+      from: "2026-09-01T00:00:00Z",
+      to: "2026-10-06T23:59:59Z",
+    });
+    expect(archived.items[0].sources[0].url).toBe(original.sourceUrl);
   });
   it("expires private text after 90 days while preserving public provenance", async () => {
     await run([await item(1)]);
@@ -783,7 +830,8 @@ describe("durable ingestion and public D1 API", () => {
         }),
         env,
       );
-    expect((await drain("source=court-decisions&drain=1")).status).toBe(200);
+    expect((await drain("source=npu-telegram&drain=1")).status).toBe(200);
+    expect((await drain("source=court-decisions&drain=1")).status).toBe(410);
     expect((await drain("source=https://example.test&drain=1")).status).toBe(
       400,
     );
@@ -953,11 +1001,14 @@ describe("hourly fan-out and durable queue", () => {
   }
   it("checks every registered web source in one hourly cycle and isolates a failed feed", async () => {
     const fetched: string[] = [];
+    const activeCount = sources.filter(
+      (s) => s.enabled !== false && s.transport !== "court",
+    ).length;
     expect(
       (await dispatchHourly(sqlite.db, queue.producer, anchor)).dispatched,
-    ).toBe(sources.filter((s) => s.transport !== "court").length);
+    ).toBe(activeCount);
     await dispatchHourly(sqlite.db, queue.producer, anchor + 1000);
-    expect(queue.messages).toHaveLength(12);
+    expect(queue.messages).toHaveLength(activeCount);
     while (queue.messages.length) {
       sqlite.queries = 0;
       await consumeTask(
@@ -976,14 +1027,14 @@ describe("hourly fan-out and durable queue", () => {
       );
       expect(sqlite.queries).toBeLessThanOrEqual(50);
     }
-    expect(new Set(fetched).size).toBe(12);
+    expect(new Set(fetched).size).toBe(activeCount);
     expect(
       sqlite.sqlite
         .prepare("SELECT last_error FROM sources WHERE id='npu-news'")
         .get()?.last_error,
     ).toBe("Source HTTP 403");
   });
-  it("drains persisted work immediately, includes court processing, and never re-fetches during continuation or redelivery", async () => {
+  it("drains persisted work immediately and never re-fetches during continuation or redelivery", async () => {
     const records = await Promise.all(
       Array.from({ length: 14 }, (_, i) =>
         item(600 + i, "Поради", `fixture ${i}`),
@@ -1026,6 +1077,8 @@ describe("hourly fan-out and durable queue", () => {
       last_success_at: pollState!.last_success_at,
       next_attempt_at: pollState!.next_attempt_at,
     });
+  });
+  it("excludes archived court work from dispatch and recovery, and safely retires old deliveries", async () => {
     sqlite.sqlite
       .prepare(
         "INSERT INTO sources(id,name,url,metadata) VALUES('court-decisions','court','https://data.gov.ua/','{}')",
@@ -1043,21 +1096,47 @@ describe("hourly fan-out and durable queue", () => {
     await dispatchHourly(sqlite.db, queue.producer, anchor, [
       sourceById("court-decisions")!,
     ]);
-    expect(queue.messages).toHaveLength(1);
-    await consumeTask(
+    expect(queue.messages).toHaveLength(0);
+    sqlite.sqlite
+      .prepare(
+        "INSERT INTO ingestion_tasks(id,source_id,cycle,step,kind,created_at) VALUES('archived','court-decisions',?,0,'process',?),('archived-next','court-decisions',?,1,'process',?)",
+      )
+      .run(anchor, anchor, anchor, anchor);
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    expect(
+      queue.messages.every(
+        ({ id }) => id !== "archived" && id !== "archived-next",
+      ),
+    ).toBe(true);
+    const messagesBefore = queue.messages.length;
+    const result = await consumeTask(
       sqlite.db,
       queue.producer,
-      queue.messages.shift()!,
+      { id: "archived" },
       anchor,
       () => {
         throw new Error("Court process must not fetch");
       },
     );
+    expect(result).toMatchObject({ skipped: true, archived: true });
+    expect(queue.messages).toHaveLength(messagesBefore);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT status FROM ingestion_tasks WHERE id='archived'")
+        .get()?.status,
+    ).toBe("done");
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      { id: "archived" },
+      anchor + 1,
+    );
+    expect(queue.messages).toHaveLength(messagesBefore);
     expect(
       sqlite.sqlite
         .prepare("SELECT status FROM raw_source_items WHERE id='court'")
         .get()?.status,
-    ).toBe("rejected");
+    ).toBe("collected");
   });
   it("delays the next hourly poll when its actual 60-minute interval has not elapsed", async () => {
     let fetches = 0;

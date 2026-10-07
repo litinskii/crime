@@ -29,6 +29,10 @@ export interface SourceDefinition {
   /** Exact hosts allowed for canonical article provenance; links are not fetched. */
   canonicalHosts?: readonly string[];
   cadenceMinutes?: number;
+  /** Archived definitions retain provenance but cannot collect or process new data. */
+  enabled?: boolean;
+  /** Bounded publisher adapter; only explicitly configured article paths are fetched. */
+  rssProfile?: "dnepr" | "citysites" | "poltava" | "lb";
 }
 export interface SourceCollector {
   source: SourceDefinition;

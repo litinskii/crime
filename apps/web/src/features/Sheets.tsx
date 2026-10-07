@@ -287,21 +287,23 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
                 {t("sourceReports", { count: source.published ?? 0 })}
               </p>
               <p className="small subtle">
-                {source.last_error
-                  ? t("sourceRetry", {
-                      date: source.next_attempt_at
-                        ? new Date(source.next_attempt_at).toLocaleString(
-                            i18n.language === "uk" ? "uk-UA" : "en-GB",
-                          )
-                        : "—",
-                    })
-                  : source.last_success_at
-                    ? t("dataUpdated", {
-                        date: new Date(source.last_success_at).toLocaleString(
-                          i18n.language === "uk" ? "uk-UA" : "en-GB",
-                        ),
+                {source.enabled === false
+                  ? t("sourceArchived")
+                  : source.last_error
+                    ? t("sourceRetry", {
+                        date: source.next_attempt_at
+                          ? new Date(source.next_attempt_at).toLocaleString(
+                              i18n.language === "uk" ? "uk-UA" : "en-GB",
+                            )
+                          : "—",
                       })
-                    : t("sourcePending")}
+                    : source.last_success_at
+                      ? t("dataUpdated", {
+                          date: new Date(source.last_success_at).toLocaleString(
+                            i18n.language === "uk" ? "uk-UA" : "en-GB",
+                          ),
+                        })
+                      : t("sourcePending")}
               </p>
               {source.lastNewItemAt && (
                 <p className="small subtle">
@@ -312,7 +314,7 @@ export function SettingsSheet({ onClose }: { onClose: () => void }) {
                   })}
                 </p>
               )}
-              {Boolean(source.pending) && (
+              {source.enabled !== false && Boolean(source.pending) && (
                 <p className="small subtle">
                   {t("sourceBacklog", { count: source.pending })}
                 </p>

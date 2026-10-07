@@ -134,6 +134,13 @@ export const isCandidate = (title: string) =>
     /кримінальн|підозр|затрим|правопоруш|конфлікт|інтим|переплат|відшкодував.*подат/iu.test(
       title,
     ));
+/** Extra headline forms used only by the newly configured media adapters. */
+export const isMediaViolenceTitle = (title: string) =>
+  !excluded.test(title) &&
+  !/російськ|окупант/iu.test(title) &&
+  /розстріля|застрел|стрілянин|сокир.{0,70}поранив|поранив.{0,70}сокир/iu.test(
+    title,
+  );
 const names: Record<IncidentCategory, LocalizedText> = {
   violence: { uk: "Насильство", en: "Violence" },
   theft: { uk: "Крадіжка", en: "Theft" },
@@ -279,10 +286,18 @@ function incidentPlace(raw: RawItem, sourceRegionCode?: string): Place | null {
     ),
   ];
   const titleCues = cues(raw.title);
-  if (titleCues.length) {
-    const places = titleCues.map((m) =>
-      placeAfterCue(m[1], context, sourceRegionCode),
-    );
+  // New media headlines can locate a fire by an urban district without an
+  // "у/в" prefix ("над АНД районом Дніпра"). Require the explicit district
+  // and one settlement in the headline; a publisher's city is not evidence.
+  const districtTitle =
+    sourceById(raw.sourceId)?.rssProfile &&
+    /район(?:і|у|ом|а)?\s+(?:міста\s+)?\p{Lu}/u.test(raw.title)
+      ? resolvePlace(raw.title, context, sourceRegionCode)
+      : null;
+  if (titleCues.length || districtTitle) {
+    const places = titleCues.length
+      ? titleCues.map((m) => placeAfterCue(m[1], context, sourceRegionCode))
+      : [districtTitle];
     if (places.some((p) => !p)) return null;
     const unique = [...new Map(places.map((p) => [p!.key, p!])).values()];
     const whole = resolvePlace(raw.title, context, sourceRegionCode);
@@ -354,8 +369,13 @@ export class IncidentProcessor {
       )
     )
       return { status: "rejected", reason: "war-related-harm" };
+    const titleCategory = classify(raw.title);
+    const mediaViolence = source.rssProfile && isMediaViolenceTitle(raw.title);
+    if (mediaViolence && titleCategory && titleCategory !== "violence")
+      return { status: "review", reason: "multiple-headline-categories" };
     const category =
-      classify(raw.title) ??
+      titleCategory ??
+      (mediaViolence ? "violence" : null) ??
       (isCandidate(raw.title) && !rules.some(([, re]) => re.test(raw.title))
         ? classify(raw.content.slice(0, 3000))
         : null);

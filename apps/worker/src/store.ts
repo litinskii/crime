@@ -123,10 +123,13 @@ export class D1IngestionStore implements IngestionStore {
         ]);
       }
       await this.sql(
-        `UPDATE raw_source_items SET retrieved_at=? WHERE source_id=? AND external_id IN (${items.map(() => "?").join(",")})`,
+        // Daily last-seen heartbeat keeps retention valid without rewriting
+        // every unchanged original and its indexes on each hourly poll.
+        `UPDATE raw_source_items SET retrieved_at=? WHERE source_id=? AND external_id IN (${items.map(() => "?").join(",")}) AND retrieved_at<?`,
         items[0].retrievedAt,
         sourceId,
         ...items.map((item) => item.externalId),
+        new Date(Date.parse(items[0].retrievedAt) - 86400000).toISOString(),
       ).run();
     }
     const queue = await this.sql(

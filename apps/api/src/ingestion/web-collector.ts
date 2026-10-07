@@ -7,7 +7,7 @@ import {
 } from "./collector";
 import { sourceById } from "./sources";
 import { hash } from "./hash";
-import { classify, isCandidate } from "./processor";
+import { classify, isCandidate, isMediaViolenceTitle } from "./processor";
 import type { RawItem, SourceCollector, SourceDefinition } from "./types";
 const textOf = (html: string) => {
   if (!/<[a-z!/]/i.test(html))
@@ -25,6 +25,187 @@ const textOf = (html: string) => {
     .replace(/\u00a0/g, " ")
     .trim();
 };
+const mediaProfiles = {
+  dnepr: { path: /^\/ua\/post\/[a-z0-9-]+$/, fullText: true },
+  citysites: { path: /^\/news\/[1-9][0-9]*\/[a-z0-9-]+$/, fullText: true },
+  poltava: { path: /^\/news\/[1-9][0-9]*\/$/, fullText: false },
+  lb: {
+    path: /^\/society\/\d{4}\/\d{2}\/\d{2}\/[1-9][0-9]*_[a-z0-9_]+\.html$/,
+    fullText: false,
+  },
+} as const;
+const mediaItemLimit = 12;
+const mediaScanLimit = 160;
+const mediaLookback = 7 * 86400000;
+// These are explanatory articles or war/collaboration proceedings, not a
+// report of a supported ordinary incident. Generic "suspected" headlines
+// otherwise let a passing mention of traffic rules become a false ДТП point.
+const mediaNonEvent =
+  /^(?:Як|Чому|Що робити|Поради|Військове капеланство)(?=\s|[,:.!?]|$)|колаборан|колаборац|окупац|державн.{0,30}зрад|співпрац.{0,40}(?:рф|росі)|російськ.{0,30}(?:адмірал|військов|удар)|воєнн.{0,20}злочин/iu;
+
+/** Remove publisher recommendations before extracting dates and places. */
+function mediaText(html: string): string {
+  const $ = load(html.slice(0, 60000));
+  $(
+    'script,style,noscript,aside,nav,iframe,.related,.related-news,.read-also,.inset,.inset-read,[class*="inset-"],[class*="related"],.author',
+  ).remove();
+  $("br").replaceWith("\n");
+  $("p,h2,h3,li").append("\n");
+  const paragraphs = $.root()
+    .text()
+    .normalize("NFC")
+    .replace(/\u00a0/g, " ")
+    .split(/\n+/);
+  const kept: string[] = [];
+  for (const paragraph of paragraphs) {
+    const line = paragraph.trim();
+    if (
+      kept.length &&
+      /^(?:(?:Нагадаємо|Раніше|Читайте також)(?=\s|[,:.!?]|$)|Джерело\s*:)/iu.test(
+        line,
+      )
+    )
+      break;
+    if (line) kept.push(line);
+  }
+  return kept.join("\n").slice(0, 20000);
+}
+const decodeXml = (s: string) =>
+  s.replace(
+    /&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos);/gi,
+    (entity, code: string) => {
+      if (code.startsWith("#")) {
+        const n =
+          code[1].toLowerCase() === "x"
+            ? parseInt(code.slice(2), 16)
+            : Number(code.slice(1));
+        return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff)
+          ? String.fromCodePoint(n)
+          : entity;
+      }
+      return (
+        (
+          { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" } as Record<
+            string,
+            string
+          >
+        )[code.toLowerCase()] ?? entity
+      );
+    },
+  );
+function xmlField(item: string, field: string): string {
+  const value =
+    new RegExp(`<${field}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${field}\\s*>`, "i")
+      .exec(item)?.[1]
+      ?.trim() ?? "";
+  return value.startsWith("<![CDATA[") && value.endsWith("]]>")
+    ? value.slice(9, -3)
+    : decodeXml(value);
+}
+
+function mediaArticleBlock(
+  html: string,
+  profile: NonNullable<SourceDefinition["rssProfile"]>,
+): string {
+  for (const start of html.matchAll(/<(div|article)\b([^>]{0,2000})>/gi)) {
+    const classes =
+      /\bclass=["']([^"']*)["']/i.exec(start[2])?.[1]?.split(/\s+/) ?? [];
+    const matches =
+      profile === "lb"
+        ? /\bitemprop=["']articleBody["']/i.test(start[2])
+        : profile === "poltava"
+          ? start[1].toLowerCase() === "article" &&
+            classes.includes("wym") &&
+            classes.includes("content")
+          : profile === "dnepr"
+            ? classes.includes("content") && classes.includes("mb-5")
+            : classes.includes("article-details__text");
+    if (!matches) continue;
+    const tags = new RegExp(`<\\/?${start[1]}\\b[^>]*>`, "gi");
+    tags.lastIndex = start.index! + start[0].length;
+    let depth = 1,
+      end = tags.lastIndex,
+      match: RegExpExecArray | null;
+    while ((match = tags.exec(html)) && match.index - start.index! < 120000) {
+      depth += match[0].startsWith("</") ? -1 : 1;
+      end = tags.lastIndex;
+      if (!depth) return html.slice(start.index, end);
+    }
+    return "";
+  }
+  return "";
+}
+
+async function parseMediaFeed(
+  xml: string,
+  source: SourceDefinition,
+  retrievedAt: string,
+): Promise<RawItem[]> {
+  // Read small candidate items only: never construct a DOM for a multi-MB feed.
+  if (
+    xml.length > 2_000_000 ||
+    /<!DOCTYPE/i.test(xml) ||
+    !/<rss\b/i.test(xml) ||
+    !/<\/rss\s*>\s*$/i.test(xml)
+  )
+    throw new SourceAccessError("Source RSS invalid or exceeds size limit");
+  const now = Date.parse(retrievedAt),
+    candidates = new Map<
+      string,
+      { title: string; url: string; publishedAt: string; body: string }
+    >();
+  let scanned = 0;
+  for (const match of xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item\s*>/gi)) {
+    if (++scanned > mediaScanLimit) break;
+    const item = match[1],
+      title = textOf(xmlField(item, "title")),
+      url = allowedArticle(source, xmlField(item, "link")),
+      publishedAt = dateOf(
+        xmlField(item, "pubDate") || xmlField(item, "dc:date"),
+      );
+    if (
+      !url ||
+      mediaNonEvent.test(title) ||
+      !(isCandidate(title) || isMediaViolenceTitle(title)) ||
+      !publishedAt ||
+      !Number.isFinite(now) ||
+      Date.parse(publishedAt) < now - mediaLookback ||
+      Date.parse(publishedAt) > now + 300000
+    )
+      continue;
+    candidates.set(url, {
+      title,
+      url,
+      publishedAt,
+      body: xmlField(item, "content:encoded") || xmlField(item, "description"),
+    });
+  }
+  if (!scanned)
+    throw new SourceAccessError("Source feed empty or layout changed");
+  const result: RawItem[] = [];
+  for (const item of [...candidates.values()]
+    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
+    .slice(0, mediaItemLimit)) {
+    const body = mediaText(item.body),
+      content = `${item.title}\n${body}`;
+    if (mediaProfiles[source.rssProfile!].fullText && body.length < 100)
+      throw new SourceAccessError(
+        "Source RSS full text missing; collection stopped",
+      );
+    result.push({
+      sourceId: source.id,
+      externalId: item.url,
+      sourceUrl: item.url,
+      canonicalUrl: item.url,
+      title: item.title,
+      content,
+      publishedAt: item.publishedAt,
+      retrievedAt,
+      contentHash: await hash(content),
+    });
+  }
+  return result;
+}
 const dateOf = (value?: string) =>
   value && Number.isFinite(Date.parse(value))
     ? new Date(value).toISOString()
@@ -44,8 +225,9 @@ export function allowedArticle(
       url.port
     )
       return null;
-    const valid =
-      source.id === "zaxid-news"
+    const valid = source.rssProfile
+      ? mediaProfiles[source.rssProfile].path.test(url.pathname)
+      : source.id === "zaxid-news"
         ? /^\/[a-z0-9_]+_n\d+$/.test(url.pathname)
         : source.id === "ukrinform-regions"
           ? /^\/rubric-regions\/\d+-[^/]+\.html$/.test(url.pathname)
@@ -65,6 +247,7 @@ export async function parseFeed(
   source: SourceDefinition,
   retrievedAt: string,
 ): Promise<RawItem[]> {
+  if (source.rssProfile) return parseMediaFeed(xml, source, retrievedAt);
   const $ = load(xml, { xmlMode: true }),
     result: RawItem[] = [];
   for (const node of $("item").toArray().slice(0, 30)) {
@@ -93,7 +276,10 @@ export async function parseFeed(
   }
   return result;
 }
-export function parseArticle(html: string): {
+export function parseArticle(
+  html: string,
+  source?: SourceDefinition,
+): {
   title: string;
   content: string;
   publishedAt: string | null;
@@ -127,7 +313,10 @@ export function parseArticle(html: string): {
   ).trim();
   let content =
     typeof article?.articleBody === "string" ? textOf(article.articleBody) : "";
-  if (!content) {
+  if (source?.rssProfile) {
+    const body = mediaArticleBlock(html, source.rssProfile);
+    content = body ? mediaText(body) : content ? mediaText(content) : "";
+  } else if (!content) {
     // Construct a DOM only for the article, excluding menus, ads and related stories.
     const start =
       /<(div|article)\b[^>]*class=["'][^"']*\b(?:newsText|news-text|article-text|article__content|entry-content)\b[^"']*["'][^>]*>/i.exec(
@@ -244,7 +433,7 @@ export class WebCollector implements SourceCollector {
         this.source,
         now,
       );
-      if (!items.length)
+      if (!items.length && !this.source.rssProfile)
         throw new SourceAccessError("Source feed empty or layout changed");
     } else {
       const $ = load(await this.get(this.source.url, options.signal));
@@ -272,12 +461,20 @@ export class WebCollector implements SourceCollector {
     }
     for (const item of items) {
       if (
-        (!this.articleUrls && !isCandidate(item.title)) ||
-        this.source.id === "patrol-rss"
+        (!this.articleUrls &&
+          !(
+            isCandidate(item.title) ||
+            (this.source.rssProfile && isMediaViolenceTitle(item.title))
+          )) ||
+        this.source.id === "patrol-rss" ||
+        (!this.articleUrls &&
+          this.source.rssProfile &&
+          mediaProfiles[this.source.rssProfile].fullText)
       )
         continue;
       const article = parseArticle(
         await this.get(item.sourceUrl, options.signal),
+        this.source,
       );
       if (!article.content || article.content.length < 100)
         throw new SourceAccessError(
@@ -290,7 +487,10 @@ export class WebCollector implements SourceCollector {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
     return items.filter(
-      (item) => isCandidate(item.title) || classify(item.content) !== null,
+      (item) =>
+        isCandidate(item.title) ||
+        (this.source.rssProfile && isMediaViolenceTitle(item.title)) ||
+        classify(item.content) !== null,
     );
   }
 }
@@ -298,7 +498,7 @@ export function createCollector(
   id: string,
 ): SourceCollector & { nextBefore?: number } {
   const source = sourceById(id);
-  if (!source || source.transport === "court")
+  if (!source || source.enabled === false || source.transport === "court")
     throw new SourceAccessError("Source is not a scheduled web collector");
   return source.transport === "telegram"
     ? new PoliceTelegramCollector(source)

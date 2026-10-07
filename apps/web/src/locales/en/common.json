@@ -103,7 +103,7 @@
   "viewMap": "Explore the map",
   "dateRange": "{{from}} – {{to}}",
   "liveReports": "Public reports",
-  "liveCoverage": "Police, media and court reports. Partial coverage; markers show settlement centres.",
+  "liveCoverage": "Police and media reports, plus archived court records. Partial coverage; markers show settlement centres.",
   "dataUpdated": "Source checked: {{date}}",
   "cityCentre": "Centre of the mentioned city — the incident site is unknown",
   "dataSources": "Data sources",
@@ -113,5 +113,6 @@
   "sourceReports": "{{count}} reports on the map",
   "sourceRetry": "Source unavailable. Next retry: {{date}}",
   "sourcePending": "Awaiting collection",
+  "sourceArchived": "Archived source. Historical reports remain on the map; collection has stopped.",
   "coordinateAttribution": "Settlement coordinates:"
 }

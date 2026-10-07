@@ -57,6 +57,7 @@ export async function dispatchHourly(
   now = Date.now(),
   definitions: readonly SourceDefinition[] = sources,
 ) {
+  definitions = definitions.filter((source) => source.enabled !== false);
   if (!definitions.length) return { dispatched: 0 };
   if (definitions.length > 20)
     throw new Error("Scheduled source bound exceeded");
@@ -110,9 +111,9 @@ export async function dispatchHourly(
   // Unsent work and expired deliveries are recovered independently of new polls.
   const outbox = await db
     .prepare(
-      "SELECT * FROM ingestion_tasks WHERE status<>'done' AND lease_until<? AND (dispatched_at IS NULL OR dispatched_at<?) ORDER BY cycle DESC,step,id LIMIT 40",
+      `SELECT * FROM ingestion_tasks WHERE source_id IN (${ids.map(() => "?").join(",")}) AND status<>'done' AND lease_until<? AND (dispatched_at IS NULL OR dispatched_at<?) ORDER BY cycle DESC,step,id LIMIT 40`,
     )
-    .bind(now, now - 15 * 60000)
+    .bind(...ids, now, now - 15 * 60000)
     .all<Task>();
   return { dispatched: await sendTasks(db, queue, outbox.results, now) };
 }
@@ -144,12 +145,24 @@ export async function consumeTask(
     .bind(input.id)
     .first<Task>();
   if (!task) return { skipped: true };
+  const source = sourceById(task.source_id);
+  if (!source) throw new Error("Unknown queued source");
+  if (source.enabled === false) {
+    // A delivery created before archival must not fetch, reprocess or enqueue
+    // more work. Retire only its task, preserving historical public provenance.
+    if (task.status !== "done")
+      await db
+        .prepare(
+          "UPDATE ingestion_tasks SET status='done',lease_until=0 WHERE id=?",
+        )
+        .bind(task.id)
+        .run();
+    return { skipped: true, source: source.id, archived: true };
+  }
   if (task.status === "done") {
     await sendSuccessor(db, queue, task, now);
     return { skipped: true };
   }
-  const source = sourceById(task.source_id);
-  if (!source) throw new Error("Unknown queued source");
   // An old hourly poll never becomes an extra feed fetch in a later cycle.
   if (task.kind === "poll" && task.cycle < Math.floor(now / hour) * hour)
     task.kind = "process";

@@ -67,6 +67,7 @@ export interface SourceStatus {
     name: string;
     url: string;
     kind: "official" | "media" | "court";
+    enabled?: boolean;
     published?: number;
     pending?: number;
     latestPublicationAt?: string | null;

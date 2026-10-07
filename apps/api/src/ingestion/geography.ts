@@ -37,6 +37,8 @@ const exceptions: Record<string, string[]> = {
   "Біла Церква": ["Білій Церкві", "Білої Церкви", "Білу Церкву"],
   "Кривий Ріг": ["Кривому Розі", "Кривого Рогу", "Кривий Ріг"],
   "Кам'янець-Подільський": ["Кам'янці-Подільському", "Кам'янця-Подільського"],
+  "Кам'янське": ["Кам'янському", "Кам'янського", "Кам'янським"],
+  "Кам’янське": ["Кам’янському", "Кам’янського", "Кам’янським"],
   Тернопіль: ["Тернополі", "Тернополя"],
   Рівне: ["Рівному", "Рівного"],
   Рокитне: ["Рокитному", "Рокитного", "Рокитним"],
@@ -76,6 +78,22 @@ for (const place of gazetteer) {
         forms.set(key, [...old, place]);
     }
 }
+function streetName(tokens: string[], index: number, length: number): boolean {
+  if (
+    /^(?:вулиці|вулицю|вулиця|вул|проспекті|проспекту|проспект|просп|провулку|провулок|пров|бульварі|бульвару|бульвар|бульв|узвозі|узвіз|площі|площа|шосе|автошляху|автодороги)$/iu.test(
+      tokens[index - 1] ?? "",
+    )
+  )
+    return true;
+  // The genitive adjective in “Донецького шосе” is a road name, while
+  // “У Донецькому вулиці...” still names a separately located settlement.
+  return (
+    /(?:ого|ої)$/iu.test(tokens[index + length - 1] ?? "") &&
+    /^(?:шосе|тракту|тракт|провулку|провулок|проспекту|проспект|бульвару|бульвар)$/iu.test(
+      tokens[index + length] ?? "",
+    )
+  );
+}
 function placeMentions(text: string): Place[][] {
   const tokens = normalize(text).match(/[\p{L}]+(?:['-][\p{L}]+)*/gu) ?? [];
   const found: Place[][] = [];
@@ -83,6 +101,7 @@ function placeMentions(text: string): Place[][] {
     for (let n = 3; n >= 1; n--) {
       const matches = forms.get(tokens.slice(i, i + n).join(" "));
       if (!matches) continue;
+      if (streetName(tokens, i, n)) continue;
       // Small villages also share names with months and regions (Вересня,
       // Буковина). Count them only after a settlement cue or as a bare lookup.
       if (
@@ -135,6 +154,30 @@ const regions: Record<string, RegExp> = {
   "26": /Запоріжж|Запорізьк/iu,
   "27": /Житомирщ|Житомирськ/iu,
 };
+// Запоріжжя is both a city and a village in the same oblast. The source's
+// coverage cannot distinguish them; require a city label or a named urban
+// district. Districts verified at https://zp.gov.ua/pages/318556-struktura-miskoyi-vladi.
+const zaporizhzhiaName = "Запоріжж(?:я|і|ю|ям)(?!\\p{L})";
+const zaporizhzhiaVillage = new RegExp(
+  `(?<!\\p{L})(?:селі|село|села|с\\.|селищі|селище|селища)\\s*${zaporizhzhiaName}`,
+  "iu",
+);
+const zaporizhzhiaCity = new RegExp(
+  `(?<!\\p{L})(?:місті|місто|міста|м\\.)\\s*${zaporizhzhiaName}`,
+  "iu",
+);
+const zaporizhzhiaDistrict = new RegExp(
+  `(?<!\\p{L})(?:Вознесенівськ|Дніпровськ|Заводськ|Космічн|Олександрівськ|Хортицьк|Шевченківськ)(?:ому|ого|ий)\\s+район(?:і|у)?\\s+(?:(?:міста|м\\.)\\s*)?${zaporizhzhiaName}`,
+  "iu",
+);
+function explicitCity(matches: Place[], text: string): Place[] {
+  const city = matches.find((place) => place.key === "geonames-687700");
+  if (!city || matches.length < 2 || zaporizhzhiaVillage.test(text))
+    return matches;
+  return zaporizhzhiaCity.test(text) || zaporizhzhiaDistrict.test(text)
+    ? [city]
+    : matches;
+}
 export function resolvePlace(
   text: string,
   context = text,
@@ -153,12 +196,14 @@ export function resolvePlace(
         ? sourceRegionCode
         : undefined;
   const resolved: Place[] = [];
+  const evidence = `${text}\n${context}`;
   for (const matches of mentions) {
-    const candidates =
+    let candidates =
       region &&
       (matches.length > 1 || matches.some((place) => ruralKeys.has(place.key)))
         ? matches.filter((place) => place.regionCode === region)
         : matches;
+    candidates = explicitCity(candidates, evidence);
     if (candidates.length !== 1) return null;
     if (ruralKeys.has(candidates[0].key) && !region) return null;
     resolved.push(candidates[0]);
@@ -177,6 +222,7 @@ export function placeAfterCue(
   const tokens = text.match(/[\p{L}]+(?:['’ʼ-][\p{L}]+)*/gu) ?? [];
   for (let n = Math.min(3, tokens.length); n >= 1; n--) {
     if (!forms.has(normalize(tokens.slice(0, n).join(" ")))) continue;
+    if (streetName(tokens, 0, n)) return null;
     if (
       tokens[n] &&
       /^\p{Lu}\p{Ll}/u.test(tokens[n] ?? "") &&

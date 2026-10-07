@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic, shortened text; Citysites RSS shape checked on 2026-10-07. -->
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>061.ua</title>
+    <item>
+      <title>У Запоріжжі водій спровокував ДТП</title>
+      <link>https://www.061.ua/news/4163789/u-zaporizzi-panij-vodij-ziguliv-sprovokuvav-dtp</link>
+      <guid>https://www.061.ua/news/4163789</guid>
+      <pubDate>Tue, 06 Oct 2026 17:36:00 +0300</pubDate>
+      <description>Короткий опис аварії.</description>
+      <category>Пригоди</category>
+      <content:encoded><![CDATA[
+        <p><em><span>У Запоріжжі водій скоїв дорожньо-транспортну пригоду.</span></em></p>
+        <p><span>У Шевченківському районі Запоріжжя зіткнулися два автомобілі. Про це повідомила <a href="https://t.me/patrolpolicezp/19296">Патрульна поліція</a> 6 жовтня.</span></p>
+        <p><span>Патрульні склали адміністративні протоколи.</span></p>
+        <p><span>Раніше 061 повідомляв про <a href="https://www.061.ua/news/4163743/unrelated">іншу подію unrelated_reminder</a>.</span></p>
+        <p>Джерело: 061.ua unrelated_footer</p>
+      ]]></content:encoded>
+    </item>
+  </channel>
+</rss>

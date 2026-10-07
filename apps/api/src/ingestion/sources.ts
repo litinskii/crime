@@ -133,6 +133,49 @@ export const sources: SourceDefinition[] = [
     verificationUrl: "https://zaxid.net/home/showRss.do",
   },
   {
+    id: "dnepr-news",
+    name: "Дніпро Оперативний",
+    kind: "media",
+    transport: "rss",
+    rssProfile: "dnepr",
+    regionCode: "04",
+    cadenceMinutes: 60,
+    url: "https://dnepr.express/feeds/novini-ukrayinskoyu-dlya-gugl-nyuz",
+    verificationUrl: "https://dnepr.express/ua",
+  },
+  {
+    id: "zaporizhzhia-061",
+    name: "061.ua — Запоріжжя",
+    kind: "media",
+    transport: "rss",
+    rssProfile: "citysites",
+    regionCode: "26",
+    cadenceMinutes: 60,
+    url: "https://www.061.ua/rss",
+    verificationUrl: "https://www.061.ua/",
+  },
+  {
+    id: "poltava-events",
+    name: "Полтавщина",
+    kind: "media",
+    transport: "rss",
+    rssProfile: "poltava",
+    regionCode: "18",
+    cadenceMinutes: 60,
+    url: "https://poltava.to/rss/events.xml",
+    verificationUrl: "https://poltava.to/news/events/",
+  },
+  {
+    id: "lb-society",
+    name: "LB.ua",
+    kind: "media",
+    transport: "rss",
+    rssProfile: "lb",
+    cadenceMinutes: 60,
+    url: "https://lb.ua/rss/ukr/society.xml",
+    verificationUrl: "https://lb.ua/rss",
+  },
+  {
     id: "npu-news",
     name: "Нацполіція — вебсайт",
     kind: "official",
@@ -158,6 +201,7 @@ export const sources: SourceDefinition[] = [
   },
   {
     id: "court-decisions",
+    enabled: false,
     name: "Єдиний державний реєстр судових рішень",
     kind: "court",
     transport: "court",
@@ -169,5 +213,5 @@ export const sources: SourceDefinition[] = [
 export const sourceById = (id: string) =>
   sources.find((source) => source.id === id);
 export const scheduledSources = sources.filter(
-  (source) => source.transport !== "court",
+  (source) => source.enabled !== false && source.transport !== "court",
 );
