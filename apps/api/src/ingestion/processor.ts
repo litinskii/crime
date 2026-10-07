@@ -18,7 +18,7 @@ import type {
   SummaryProvider,
 } from "./types";
 export { gazetteer } from "./geography";
-export const ruleVersion = "rules-v4-event-date-region-evidence-4";
+export const ruleVersion = "rules-v5-regional-small-settlements-1";
 export class CityGeocoder implements Geocoder {
   async geocode(place: Place) {
     return gazetteer.find((city) => city.key === place.key) ?? null;
@@ -327,14 +327,14 @@ export class SafeSummaryProvider implements SummaryProvider {
       en: `${name.en} · ${place.en}`,
       description: {
         uk: [
-          `${facts?.status === "court" ? "Судове рішення описує подію" : "Публічне джерело повідомило про подію"}: ${name.uk.toLocaleLowerCase("uk")}. Місто, зазначене в повідомленні: ${place.uk}.`,
+          `${facts?.status === "court" ? "Судове рішення описує подію" : "Публічне джерело повідомило про подію"}: ${name.uk.toLocaleLowerCase("uk")}. Населений пункт, зазначений у повідомленні: ${place.uk}.`,
           ...details.map((d) => d.uk),
-          `Позначка показує центр міста, а не місце події. ${facts?.occurredOn ? "Дату події наведено без точного часу." : "Час події не встановлено; показано дату публікації."} Подробиці та контекст — у джерелі.`,
+          `Позначка показує центр населеного пункту, а не місце події. ${facts?.occurredOn ? "Дату події наведено без точного часу." : "Час події не встановлено; показано дату публікації."} Подробиці та контекст — у джерелі.`,
         ].join(" "),
         en: [
-          `${facts?.status === "court" ? "A court judgment describes" : "A public source reported"} ${name.en.toLowerCase()}. The city identified in the report is ${place.en}.`,
+          `${facts?.status === "court" ? "A court judgment describes" : "A public source reported"} ${name.en.toLowerCase()}. The settlement identified in the report is ${place.en}.`,
           ...details.map((d) => d.en),
-          `The marker represents the city centre, not the incident site. ${facts?.occurredOn ? "The event date is given without an exact time." : "The incident time is unknown; the publication date is shown."} Follow the source for details and context.`,
+          `The marker represents the settlement centre, not the incident site. ${facts?.occurredOn ? "The event date is given without an exact time." : "The incident time is unknown; the publication date is shown."} Follow the source for details and context.`,
         ].join(" "),
       },
     };

@@ -1,9 +1,24 @@
 import places from "./ukraine-places.json";
+import ruralRows from "./ukraine-rural-places.json";
 import { locationCities } from "@crime-radar/shared";
 import type { Place } from "./types";
 
-// GeoNames CC BY 4.0; current uk names, populated places >=1000 inhabitants.
-export const gazetteer: Place[] = places.map((place) => {
+// GeoNames CC BY 4.0. Small-settlement matches additionally require regional
+// evidence: their national homonym coverage is incomplete in this bounded file.
+const rural: Place[] = (
+  ruralRows as [string, string, string, number, number, string, string[]][]
+).map(([id, uk, en, latitude, longitude, regionCode, aliases]) => ({
+  key: `geonames-${id}`,
+  uk,
+  en,
+  latitude,
+  longitude,
+  regionCode,
+  aliases,
+  precision: "city",
+}));
+const ruralKeys = new Set(rural.map((place) => place.key));
+export const gazetteer: Place[] = [...places, ...rural].map((place) => {
   const familiar = locationCities.find((city) => city.uk === place.uk);
   return {
     ...place,
@@ -68,6 +83,16 @@ function placeMentions(text: string): Place[][] {
     for (let n = 3; n >= 1; n--) {
       const matches = forms.get(tokens.slice(i, i + n).join(" "));
       if (!matches) continue;
+      // Small villages also share names with months and regions (Вересня,
+      // Буковина). Count them only after a settlement cue or as a bare lookup.
+      if (
+        matches.every((place) => ruralKeys.has(place.key)) &&
+        !(i === 0 && tokens.length === n) &&
+        !/^(?:у|в|с|селі|села|село|селищі|селище|м|місті|міста)$/u.test(
+          tokens[i - 1] ?? "",
+        )
+      )
+        continue;
       found.push(matches);
       i += n - 1;
       break;
@@ -130,10 +155,12 @@ export function resolvePlace(
   const resolved: Place[] = [];
   for (const matches of mentions) {
     const candidates =
-      matches.length > 1 && region
+      region &&
+      (matches.length > 1 || matches.some((place) => ruralKeys.has(place.key)))
         ? matches.filter((place) => place.regionCode === region)
         : matches;
     if (candidates.length !== 1) return null;
+    if (ruralKeys.has(candidates[0].key) && !region) return null;
     resolved.push(candidates[0]);
   }
   const unique = [

@@ -22,9 +22,9 @@ describe("source region geography hints", () => {
     "resolves one homonymous named place from source coverage: %s",
     (text) => {
       expect(resolvePlace(text)).toBeNull();
-      expect(resolvePlace(text, text, "19")).toMatchObject({
-        key: "geonames-695516",
-        regionCode: "19",
+      expect(resolvePlace(text, text, "03")).toMatchObject({
+        key: "geonames-695854",
+        regionCode: "03",
         uk: "Рокитне",
       });
     },
@@ -34,9 +34,9 @@ describe("source region geography hints", () => {
       placeAfterCue(
         "Рокитному сталася пожежа",
         "Рокитному сталася пожежа",
-        "19",
+        "03",
       ),
-    ).toMatchObject({ key: "geonames-695516" });
+    ).toMatchObject({ key: "geonames-695854" });
   });
   it("gives an explicitly named other region precedence over source coverage", () => {
     expect(
@@ -67,7 +67,7 @@ describe("source region geography hints", () => {
     expect(resolvePlace("У Києві", "У Києві", "19")).toMatchObject({
       uk: "Київ",
     });
-    expect(resolvePlace("У селі Рокитне", "У селі Рокитне", "19")?.uk).toBe(
+    expect(resolvePlace("У селі Рокитне", "У селі Рокитне", "03")?.uk).toBe(
       "Рокитне",
     );
   });
@@ -80,15 +80,11 @@ describe("source region geography hints", () => {
   });
   it("publishes at the named settlement instead of the source's capital", async () => {
     const result = await new IncidentProcessor().process(
-      await raw(
-        "У Рокитному сталася пожежа",
-        "Учора у Рокитному виникла пожежа.",
-      ),
+      await raw("У Клевані сталася пожежа", "Учора у Клевані виникла пожежа."),
     );
     expect(result.status).toBe("published");
     if (result.status !== "published") throw Error("Expected publication");
-    expect(result.incident.location.city).toBe("Рокитне");
-    expect(result.incident.location.latitude).toBe(51.27891);
+    expect(result.incident.location.city).toBe("Клевань");
     expect(result.incident.occurredOn).toBe("2026-10-05");
   });
   it("uses the explicit region in a regional-source incident", async () => {
@@ -113,5 +109,49 @@ describe("source region geography hints", () => {
       status: "review",
       reason: "unknown-or-multiple-cities",
     });
+  });
+  it("leaves same-oblast homonyms ambiguous after adding smaller settlements", () => {
+    expect(resolvePlace("У Рокитному", "У Рокитному", "19")).toBeNull();
+  });
+  it("requires regional evidence for Boratyn and distinguishes three homonyms", () => {
+    expect(resolvePlace("У Боратині")).toBeNull();
+    expect(resolvePlace("У Боратині", "У Боратині", "24")).toMatchObject({
+      key: "geonames-711678",
+      latitude: 50.70415,
+      longitude: 25.35522,
+    });
+    expect(resolvePlace("У Боратині", "У Боратині", "19")).toMatchObject({
+      key: "geonames-711679",
+    });
+    expect(
+      resolvePlace("У Боратині", "У Боратині на Львівщині", "24"),
+    ).toMatchObject({ key: "geonames-711680" });
+  });
+  it("does not treat a month or region as a village in an explicitly dated episode", () => {
+    expect(resolvePlace("30 вересня 2026 року у Києві сталася ДТП.")?.uk).toBe(
+      "Київ",
+    );
+    expect(
+      resolvePlace(
+        "Учора у Рокитному на Буковині виникла пожежа.",
+        "Учора у Рокитному на Буковині виникла пожежа.",
+        "19",
+      )?.key,
+    ).toBe("geonames-695854");
+  });
+  it("publishes a dated Boratyn incident with the Volyn source's geographic evidence", async () => {
+    const input = await raw(
+      "У Боратині сталася ДТП",
+      "5 жовтня у Боратині сталася ДТП.",
+    );
+    const result = await new IncidentProcessor().process({
+      ...input,
+      sourceId: "npu-volyn-telegram",
+      sourceUrl: "https://t.me/policevolyn/12696",
+    });
+    expect(result.status).toBe("published");
+    if (result.status !== "published") throw new Error("Expected publication");
+    expect(result.incident.location.latitude).toBe(50.70415);
+    expect(result.incident.occurredOn).toBe("2026-10-05");
   });
 });

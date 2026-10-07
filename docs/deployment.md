@@ -13,6 +13,8 @@ npm run typecheck
 npm test
 npm run build
 npx wrangler d1 migrations apply crime-radar-data --remote
+# First queue deployment only (skip if it already exists):
+npx wrangler queues create crime-radar-ingestion
 npm run deploy
 ```
 
@@ -26,6 +28,8 @@ Cron needs no external credentials. Manual collection requires `INGESTION_SECRET
 
 ```sh
 npm run ingest:worker
+# Resume the durable current hourly cycle, respecting each source's interval:
+npm run ingest:worker -- --dispatch
 # Initial backfill, one page per request with pauses:
 npm run ingest:worker -- --pages=5
 # Drain persisted work, stopping when no pending work remains:
@@ -47,17 +51,19 @@ npm run ingest:courts -- --limit=1000
 
 The CLI reads the environment or private local file. `WORKER_URL` can target another owned deployment. Outputs contain counts and public numeric cursors, never originals or secrets. Manual requests and cron share a source lease; overlapping runs are skipped.
 
-Each run stages up to 30 eligible candidates from a page and processes at most three items. Pending work persists even when posts leave the newest page. Multi-row statements and a maximum 30-item source page bound D1 queries; a test exercises the 50-query Free limit. Missing required article text or changed source layouts stop collection. Failed items retry at most three times; edits reset attempts. Daily indexed maintenance expires original text/versions older than 90 days, up to 500 rows per table per run. A large backlog can take additional days to clear. The same bounded maintenance removes old job/run history.
+Each run stages up to 30 eligible candidates from a page. A queue poll processes up to two items; process-only and manual jobs process up to three. Pending work persists even when posts leave the newest page. Multi-row statements and a maximum 30-item source page bound D1 queries; a test exercises the 50-query Free limit. Missing required article text or changed source layouts stop collection. Failed items retry at most three times; edits reset attempts. Daily indexed maintenance expires original text/versions older than 90 days, up to 500 rows per table per run. A large backlog can take additional days to clear. The same bounded maintenance removes old job/run history.
 
 ## Daily court collection
 
 `.github/workflows/harvest-courts.yml` downloads the official daily ZIP at 05:40 UTC, streams criminal verdict metadata, and submits bounded RTF references. It also runs on its own workflow/script changes and can be dispatched manually. An Actions cache holds only public IDs/metadata signatures. Authentication uses GitHub-signed, short-lived OIDC tokens, refreshed during long runs; no repository secret is required. The Worker verifies issuer, audience, signature, time bounds, immutable repository/owner IDs, main branch and exact workflow path. Forks, PR workflows and unrelated jobs cannot ingest. The OIDC token is accepted only by the court endpoint. Explicit status=0 records are withdrawn. A failed harvest is visible in Actions; the next daily run resumes from the last checkpoint.
 
-Cloudflare web-source retries back off from one hour to six hours, retaining historical public records. Every hour the scheduler polls one due source, or uses a free slot to process a pending source. The minimum poll interval is 60 minutes. A single source is selected each hourly tick, so an individual source can be checked less often when other sources are due. Process/backfill runs have separate clocks and do not update live polling success. Retention runs at 02:15 UTC. The open map refreshes its period every five minutes and source status hourly; reopening/focusing source information can trigger a stale-data refresh. Check `/api/v1/status` for actual timestamps and queue ages. The regional pilot covers Vinnytsia, Rivne, Volyn, Chernivtsi and Zhytomyr through verified public Telegram channels; other oblasts remain a later rollout.
+Cloudflare web-source retries back off from one hour to six hours, retaining historical public records. Every hour the coordinator dispatches all due web sources and any saved court work into `crime-radar-ingestion`. The consumer receives one message per invocation with concurrency 3, keeping each invocation within D1 Free's 50-query bound. Source leases and the durable D1 outbox protect against overlapping jobs and at-least-once Queue delivery. A poll waits until its actual 60-minute interval has elapsed; stale hourly poll tasks become process-only work. Fresh collected originals run before older rule versions. Continuation messages drain persisted originals without extra HTTP polling, up to 256 jobs per source/cycle and a global 640 processing jobs per UTC day (at most 1,920 process-only originals, plus bounded poll processing). This leaves capacity for hourly polls and retries on the free account. Unsent jobs and expired deliveries are recovered by the next hourly coordinator. Queue delivery failures do not delete originals; reaching a daily budget leaves them for a later cycle. Queue messages carry only a task ID; text stays private in D1.
+
+Process/backfill runs have separate clocks and do not update live polling success. Retention runs at 02:15 UTC, including old outbox tasks. The open map refreshes its period every five minutes and source status hourly; reopening/focusing source information can trigger a stale-data refresh. Check `/api/v1/status` for actual timestamps and queue ages. The regional pilot covers Vinnytsia, Rivne, Volyn, Chernivtsi and Zhytomyr through verified public Telegram channels; other oblasts remain a later rollout.
 
 ## Quotas
 
-Static assets have a [free/unlimited request allowance](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/). Dynamic Worker/API code has [separate quotas](https://developers.cloudflare.com/workers/platform/pricing/). D1 Free includes 5 million rows read/day, 100,000 written/day and 5 GB total account storage; each database is limited to 500 MB. Exhausted daily quotas block queries until reset rather than upgrading the account. Indexes reduce reads but count towards writes. See [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) and [D1 limits](https://developers.cloudflare.com/d1/platform/limits/). No paid-plan change is part of this deployment.
+Static assets have a [free/unlimited request allowance](https://developers.cloudflare.com/workers/static-assets/billing-and-limitations/). Dynamic Worker/API code has [separate quotas](https://developers.cloudflare.com/workers/platform/pricing/). D1 Free includes 5 million rows read/day, 100,000 written/day and 5 GB total account storage; each database is limited to 500 MB. Exhausted daily quotas block queries until reset rather than upgrading the account. Indexes reduce reads but count towards writes. See [D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) and [D1 limits](https://developers.cloudflare.com/d1/platform/limits/). [Queues Free](https://developers.cloudflare.com/queues/platform/pricing/) includes 10,000 read/write/delete operations per day and 24-hour message retention. Durable originals and task recovery remain in D1. No paid-plan change is part of this deployment.
 
 ## Local Worker
 

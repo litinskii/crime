@@ -5,7 +5,7 @@ import {
   eventPublicationIssue,
 } from "./event-date";
 import type { EventDateContext } from "./event-date";
-import { IncidentProcessor, ruleVersion } from "./processor";
+import { IncidentProcessor } from "./processor";
 import { hash } from "./hash";
 import type { RawItem } from "./types";
 
@@ -119,7 +119,6 @@ describe("event calendar dates", () => {
       anchorPublishedAt: "2026-10-01T08:00:00Z",
       timeZone: "Europe/Kyiv",
     });
-    expect(ruleVersion).toContain("v4");
   });
   it.each([
     "5 жовтня 2026 року затримали чоловіка, який викрав велосипед.",

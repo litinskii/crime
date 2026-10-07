@@ -1,16 +1,24 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { beforeEach, afterEach, describe, it, expect } from "vitest";
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, Queue } from "@cloudflare/workers-types";
 import { D1IngestionStore, maintainPrivateData } from "./store";
 import { D1IncidentsRepository } from "./repository";
-import worker, { runScheduledTick, type Env } from "./index";
+import worker, { type Env } from "./index";
 import { policeSource } from "../../api/src/ingestion/collector";
 import { hash } from "../../api/src/ingestion/hash";
 import { ingest } from "../../api/src/ingestion/runner";
-import type { RawItem, SourceDefinition } from "../../api/src/ingestion/types";
+import type { RawItem } from "../../api/src/ingestion/types";
 import { IncidentProcessor } from "../../api/src/ingestion/processor";
-import { sourceById } from "../../api/src/ingestion/sources";
+import { sourceById, sources } from "../../api/src/ingestion/sources";
+import {
+  dispatchHourly,
+  consumeTask,
+  dailyProcessBudget,
+  maxCycleSteps,
+  type IngestionTask,
+} from "./scheduler";
+import { ruleVersion } from "../../api/src/ingestion/processor";
 
 // Execute the actual D1 SQL against SQLite, including transactional batch semantics.
 class Statement {
@@ -347,174 +355,6 @@ describe("durable ingestion and public D1 API", () => {
     expect((await repo.getIncidents(query)).items[0].sources[0].url).toBe(
       "https://t.me/UA_National_Police/1",
     );
-  });
-  it("polls thirteen sources fairly with their own cadence and ignores obsolete source rows", async () => {
-    const definitions: SourceDefinition[] = Array.from(
-      { length: 13 },
-      (_, i) => ({
-        ...policeSource,
-        id: `fixture-${String(i).padStart(2, "0")}`,
-        cadenceMinutes: i === 0 ? 30 : 60,
-      }),
-    );
-    sqlite.sqlite
-      .prepare(
-        "INSERT INTO sources(id,name,url,metadata) VALUES('obsolete','Old','https://example.test','{}')",
-      )
-      .run();
-    const anchor = Date.now(),
-      selected: string[] = [];
-    for (let minute = 0; minute < definitions.length; minute++) {
-      const tick = await runScheduledTick(
-        sqlite.db,
-        definitions,
-        (id) => ({
-          source: definitions.find((source) => source.id === id)!,
-          collect: async () => [],
-        }),
-        anchor + minute * 60000,
-      );
-      selected.push(tick!.source);
-      expect(tick!.runKind).toBe("poll");
-    }
-    expect(new Set(selected).size).toBe(13);
-    expect(
-      sqlite.sqlite
-        .prepare("SELECT next_attempt_at FROM sources WHERE id='fixture-00'")
-        .get()?.next_attempt_at,
-    ).toBe(anchor + 30 * 60000);
-    expect(
-      sqlite.sqlite
-        .prepare("SELECT next_attempt_at FROM sources WHERE id='fixture-01'")
-        .get()?.next_attempt_at,
-    ).toBe(anchor + 61 * 60000);
-    expect(
-      await runScheduledTick(
-        sqlite.db,
-        definitions,
-        () => {
-          throw new Error("Should not fetch");
-        },
-        anchor + 15 * 60000,
-      ),
-    ).toBeNull();
-  });
-  it("uses free minute slots to drain the queue without changing polling freshness or backoff", async () => {
-    const anchor = Date.now(),
-      records = await Promise.all(
-        Array.from({ length: 10 }, (_, i) =>
-          item(200 + i, "Поради поліції", `fixture ${i}`),
-        ),
-      );
-    let fetches = 0;
-    const factory = () => ({
-      source: policeSource,
-      collect: async () => {
-        fetches++;
-        return records;
-      },
-    });
-    expect(
-      (await runScheduledTick(sqlite.db, [policeSource], factory, anchor))
-        ?.runKind,
-    ).toBe("poll");
-    sqlite.sqlite
-      .prepare(
-        "UPDATE sources SET last_error='Source HTTP 403',consecutive_failures=2 WHERE id=?",
-      )
-      .run(policeSource.id);
-    const polling = sqlite.sqlite
-      .prepare(
-        "SELECT last_success_at,last_attempt_at,next_attempt_at,last_error,consecutive_failures FROM sources WHERE id=?",
-      )
-      .get(policeSource.id);
-    expect(
-      (
-        await runScheduledTick(
-          sqlite.db,
-          [policeSource],
-          factory,
-          anchor + 60000,
-        )
-      )?.runKind,
-    ).toBe("process");
-    expect(fetches).toBe(1);
-    expect(
-      sqlite.sqlite
-        .prepare(
-          "SELECT last_success_at,last_attempt_at,next_attempt_at,last_error,consecutive_failures FROM sources WHERE id=?",
-        )
-        .get(policeSource.id),
-    ).toEqual(polling);
-    expect(
-      sqlite.sqlite
-        .prepare("SELECT last_processed_at FROM sources WHERE id=?")
-        .get(policeSource.id)?.last_processed_at,
-    ).toBe(new Date(anchor + 60000).toISOString());
-    expect(
-      sqlite.sqlite
-        .prepare(
-          "SELECT COUNT(*) AS n FROM ingestion_runs WHERE run_kind='process'",
-        )
-        .get()?.n,
-    ).toBe(1);
-  });
-  it("stays within 50 SQL queries including scheduled selection for a full page and three publications", async () => {
-    const records = [
-      await item(101),
-      await item(102, "В Одесі сталася ДТП"),
-      await item(103, "У Луцьку викрили нарколабораторію"),
-      ...(await Promise.all(
-        Array.from({ length: 27 }, (_, i) =>
-          item(i + 104, "Нагадуємо про правила", `fixture ${i}`),
-        ),
-      )),
-    ];
-    sqlite.queries = 0;
-    const tick = await runScheduledTick(sqlite.db, [policeSource], () => ({
-      source: policeSource,
-      collect: async () => records,
-    }));
-    expect(tick?.result?.published).toBe(3);
-    expect(sqlite.queries).toBeLessThanOrEqual(50);
-  });
-  it("gives due polling priority over a backlog and respects a source lease", async () => {
-    const anchor = Date.now(),
-      other = sourceById("zaxid-news")!;
-    await runScheduledTick(
-      sqlite.db,
-      [policeSource],
-      () => ({
-        source: policeSource,
-        collect: async () =>
-          Promise.all(
-            Array.from({ length: 6 }, (_, i) =>
-              item(i + 300, "Поради", "fixture"),
-            ),
-          ),
-      }),
-      anchor,
-    );
-    const tick = await runScheduledTick(
-      sqlite.db,
-      [policeSource, other],
-      (id) => ({ source: sourceById(id)!, collect: async () => [] }),
-      anchor + 60000,
-    );
-    expect(tick).toMatchObject({ source: other.id, runKind: "poll" });
-    sqlite.sqlite
-      .prepare("UPDATE sources SET next_attempt_at=0,lease_until=? WHERE id=?")
-      .run(anchor + 10 * 60000, policeSource.id);
-    expect(
-      await runScheduledTick(
-        sqlite.db,
-        [policeSource],
-        () => {
-          throw new Error("Leased source must not fetch");
-        },
-        anchor + 2 * 60000,
-      ),
-    ).toBeNull();
   });
   it("supports an authenticated dedicated drain and records backfill without resetting polling", async () => {
     const raw = await item(1);
@@ -1062,7 +902,7 @@ describe("durable ingestion and public D1 API", () => {
     for (let i = 0; i < 501; i++) insert.run(`old-${i}`);
     sqlite.queries = 0;
     await maintainPrivateData(sqlite.db);
-    expect(sqlite.queries).toBe(4);
+    expect(sqlite.queries).toBe(5);
     expect(
       sqlite.sqlite
         .prepare(
@@ -1071,5 +911,372 @@ describe("durable ingestion and public D1 API", () => {
         .get()?.n,
     ).toBe(1);
     expect((await repo.getIncidents(query)).total).toBe(1);
+  });
+});
+
+class TaskQueue {
+  messages: IngestionTask[] = [];
+  failSend = false;
+  async send(body: IngestionTask) {
+    return this.sendBatch([{ body }]);
+  }
+  async sendBatch(batch: { body: IngestionTask }[]) {
+    if (this.failSend) {
+      this.failSend = false;
+      throw new Error("Queue temporarily unavailable");
+    }
+    this.messages.push(...batch.map((m) => m.body));
+  }
+  get producer() {
+    return this as unknown as Queue<IngestionTask>;
+  }
+}
+
+describe("hourly fan-out and durable queue", () => {
+  let sqlite: SQLite, queue: TaskQueue;
+  const anchor = Date.parse("2026-10-07T08:00:00Z");
+  beforeEach(() => {
+    sqlite = new SQLite();
+    queue = new TaskQueue();
+  });
+  afterEach(() => sqlite.sqlite.close());
+  const state = (db: SQLite) =>
+    db.sqlite.prepare("SELECT * FROM sources WHERE id=?").get(policeSource.id);
+  async function seed(records: RawItem[]) {
+    const store = new D1IngestionStore(sqlite.db, {
+      runKind: "backfill",
+      now: () => anchor,
+    });
+    await store.begin(policeSource);
+    await store.stage(records, policeSource.id);
+    sqlite.sqlite.prepare("UPDATE sources SET lease_until=0").run();
+  }
+  it("checks every registered web source in one hourly cycle and isolates a failed feed", async () => {
+    const fetched: string[] = [];
+    expect(
+      (await dispatchHourly(sqlite.db, queue.producer, anchor)).dispatched,
+    ).toBe(sources.filter((s) => s.transport !== "court").length);
+    await dispatchHourly(sqlite.db, queue.producer, anchor + 1000);
+    expect(queue.messages).toHaveLength(12);
+    while (queue.messages.length) {
+      sqlite.queries = 0;
+      await consumeTask(
+        sqlite.db,
+        queue.producer,
+        queue.messages.shift()!,
+        anchor + 2000,
+        (id) => ({
+          source: sourceById(id)!,
+          collect: async () => {
+            fetched.push(id);
+            if (id === "npu-news") throw new Error("Source HTTP 403");
+            return [];
+          },
+        }),
+      );
+      expect(sqlite.queries).toBeLessThanOrEqual(50);
+    }
+    expect(new Set(fetched).size).toBe(12);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT last_error FROM sources WHERE id='npu-news'")
+        .get()?.last_error,
+    ).toBe("Source HTTP 403");
+  });
+  it("drains persisted work immediately, includes court processing, and never re-fetches during continuation or redelivery", async () => {
+    const records = await Promise.all(
+      Array.from({ length: 14 }, (_, i) =>
+        item(600 + i, "Поради", `fixture ${i}`),
+      ),
+    );
+    const fetched: string[] = [];
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    const first = queue.messages.shift()!;
+    const factory = () => ({
+      source: policeSource,
+      collect: async () => {
+        fetched.push(policeSource.id);
+        return records;
+      },
+    });
+    await consumeTask(sqlite.db, queue.producer, first, anchor, factory);
+    const pollState = state(sqlite);
+    await consumeTask(sqlite.db, queue.producer, first, anchor + 1000, factory);
+    expect(queue.messages).toHaveLength(1);
+    while (queue.messages.length) {
+      sqlite.queries = 0;
+      await consumeTask(
+        sqlite.db,
+        queue.producer,
+        queue.messages.shift()!,
+        anchor + 2000,
+        factory,
+      );
+      expect(sqlite.queries).toBeLessThanOrEqual(50);
+    }
+    expect(fetched).toHaveLength(1);
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT COUNT(*) n FROM raw_source_items WHERE status='collected'",
+        )
+        .get()?.n,
+    ).toBe(0);
+    expect(state(sqlite)).toMatchObject({
+      last_success_at: pollState!.last_success_at,
+      next_attempt_at: pollState!.next_attempt_at,
+    });
+    sqlite.sqlite
+      .prepare(
+        "INSERT INTO sources(id,name,url,metadata) VALUES('court-decisions','court','https://data.gov.ua/','{}')",
+      )
+      .run();
+    sqlite.sqlite
+      .prepare(
+        "INSERT INTO raw_source_items(id,source_id,external_id,source_url,title,content,retrieved_at,content_hash,rules,status,first_seen_at) VALUES('court','court-decisions','123','https://reyestr.court.gov.ua/Review/123','Поради','fixture',?,'hash',?,'collected',?)",
+      )
+      .run(
+        new Date(anchor).toISOString(),
+        ruleVersion,
+        new Date(anchor).toISOString(),
+      );
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [
+      sourceById("court-decisions")!,
+    ]);
+    expect(queue.messages).toHaveLength(1);
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      queue.messages.shift()!,
+      anchor,
+      () => {
+        throw new Error("Court process must not fetch");
+      },
+    );
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT status FROM raw_source_items WHERE id='court'")
+        .get()?.status,
+    ).toBe("rejected");
+  });
+  it("delays the next hourly poll when its actual 60-minute interval has not elapsed", async () => {
+    let fetches = 0;
+    const factory = () => ({
+      source: policeSource,
+      collect: async () => {
+        fetches++;
+        return [];
+      },
+    });
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      queue.messages.shift()!,
+      anchor + 5000,
+      factory,
+    );
+    await dispatchHourly(sqlite.db, queue.producer, anchor + 3600000, [
+      policeSource,
+    ]);
+    const next = queue.messages.shift()!;
+    expect(
+      await consumeTask(
+        sqlite.db,
+        queue.producer,
+        next,
+        anchor + 3600000,
+        factory,
+      ),
+    ).toEqual({ retryAfter: 5 });
+    expect(fetches).toBe(1);
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      next,
+      anchor + 3605000,
+      factory,
+    );
+    expect(fetches).toBe(2);
+  });
+  it("recovers a failed successor send after the poll completed, without fetching twice", async () => {
+    const records = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        item(950 + i, "Поради", `fixture ${i}`),
+      ),
+    );
+    let fetches = 0;
+    const factory = () => ({
+      source: policeSource,
+      collect: async () => {
+        fetches++;
+        return records;
+      },
+    });
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    const first = queue.messages.shift()!;
+    queue.failSend = true;
+    await expect(
+      consumeTask(sqlite.db, queue.producer, first, anchor, factory),
+    ).rejects.toThrow("Queue temporarily unavailable");
+    await consumeTask(sqlite.db, queue.producer, first, anchor + 1000, factory);
+    expect(fetches).toBe(1);
+    expect(queue.messages).toHaveLength(1);
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      queue.messages.shift()!,
+      anchor + 1000,
+      factory,
+    );
+    expect(
+      sqlite.sqlite
+        .prepare(
+          "SELECT COUNT(*) n FROM raw_source_items WHERE status='collected'",
+        )
+        .get()?.n,
+    ).toBe(0);
+  });
+  it("turns a delayed previous-hour poll into process-only work", async () => {
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    const task = queue.messages.shift()!;
+    expect(
+      await consumeTask(
+        sqlite.db,
+        queue.producer,
+        task,
+        anchor + 3600000,
+        () => {
+          throw new Error("Stale poll must not fetch");
+        },
+      ),
+    ).toMatchObject({ kind: "process" });
+    expect(state(sqlite)?.last_attempt_at).toBeNull();
+  });
+  it("recovers an unsent outbox after queue failure and waits on a shared source lease", async () => {
+    queue.failSend = true;
+    await expect(
+      dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]),
+    ).rejects.toThrow("Queue temporarily unavailable");
+    expect(
+      (await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]))
+        .dispatched,
+    ).toBe(1);
+    const task = queue.messages.shift()!;
+    sqlite.sqlite
+      .prepare("UPDATE sources SET lease_until=?")
+      .run(anchor + 60000);
+    expect(
+      await consumeTask(sqlite.db, queue.producer, task, anchor, () => {
+        throw new Error("No fetch under lease");
+      }),
+    ).toEqual({ retryAfter: 60 });
+  });
+  it("processes fresh collected work ahead of obsolete rules and subsequently reprocesses old work", async () => {
+    await seed([
+      await item(701, "Поради", "old"),
+      await item(702, "Поради", "new"),
+    ]);
+    sqlite.sqlite
+      .prepare(
+        "UPDATE raw_source_items SET rules='old',status='review' WHERE external_id=?",
+      )
+      .run("UA_National_Police/701");
+    const store = new D1IngestionStore(sqlite.db, {
+      runKind: "process",
+      maxItems: 2,
+    });
+    expect(
+      (await store.stage([], policeSource.id)).map((r) => r.externalId),
+    ).toEqual(["UA_National_Police/702", "UA_National_Police/701"]);
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      queue.messages.shift()!,
+      anchor,
+      () => ({ source: policeSource, collect: async () => [] }),
+    );
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT COUNT(*) n FROM raw_source_items WHERE rules<>?")
+        .get(ruleVersion)?.n,
+    ).toBe(0);
+  });
+  it("keeps a full 30-item page with two new publications and an obsolete three-publication drain within 50 queries", async () => {
+    const records = [
+      await item(801),
+      await item(802, "В Одесі сталася ДТП"),
+      await item(803, "У Луцьку викрили нарколабораторію"),
+      ...(await Promise.all(
+        Array.from({ length: 27 }, (_, i) =>
+          item(804 + i, "Поради", `fixture ${i}`),
+        ),
+      )),
+    ];
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    sqlite.queries = 0;
+    const poll = await consumeTask(
+      sqlite.db,
+      queue.producer,
+      queue.messages.shift()!,
+      anchor,
+      () => ({ source: policeSource, collect: async () => records }),
+    );
+    expect(poll).toMatchObject({ result: { published: 2 } });
+    expect(sqlite.queries).toBeLessThanOrEqual(50);
+    sqlite.sqlite
+      .prepare("UPDATE raw_source_items SET status='rejected'")
+      .run();
+    sqlite.sqlite
+      .prepare(
+        "UPDATE raw_source_items SET rules='old',status='review' WHERE external_id IN ('UA_National_Police/801','UA_National_Police/802','UA_National_Police/803')",
+      )
+      .run();
+    sqlite.queries = 0;
+    expect(
+      await consumeTask(
+        sqlite.db,
+        queue.producer,
+        queue.messages.shift()!,
+        anchor + 1000,
+      ),
+    ).toMatchObject({ result: { changed: 3 } });
+    expect(sqlite.queries).toBeLessThanOrEqual(50);
+  });
+  it("bounds continuation per cycle and daily processing capacity while reserving hourly polls", async () => {
+    await seed([
+      await item(901, "Поради", "fixture"),
+      await item(902, "Поради", "fixture"),
+      await item(903, "Поради", "fixture"),
+      await item(904, "Поради", "fixture"),
+    ]);
+    sqlite.sqlite
+      .prepare(
+        "INSERT INTO ingestion_tasks(id,source_id,cycle,step,kind,created_at) VALUES('last',?,?,?,'process',?)",
+      )
+      .run(policeSource.id, anchor, maxCycleSteps - 1, anchor);
+    await consumeTask(sqlite.db, queue.producer, { id: "last" }, anchor);
+    expect(queue.messages).toHaveLength(0);
+    const insert = sqlite.sqlite.prepare(
+      "INSERT INTO ingestion_tasks(id,source_id,cycle,step,kind,created_at,status) VALUES(?,?,?,?,'process',?,'done')",
+    );
+    for (let i = 0; i < dailyProcessBudget - 1; i++)
+      insert.run(`budget-${i}`, policeSource.id, anchor, i + 500, anchor);
+    await dispatchHourly(sqlite.db, queue.producer, anchor, [policeSource]);
+    expect(queue.messages).toHaveLength(1);
+    await consumeTask(
+      sqlite.db,
+      queue.producer,
+      queue.messages.shift()!,
+      anchor,
+      () => ({ source: policeSource, collect: async () => [] }),
+    );
+    expect(queue.messages).toHaveLength(0);
+    expect(
+      sqlite.sqlite
+        .prepare("SELECT COUNT(*) n FROM ingestion_tasks WHERE kind='process'")
+        .get()?.n,
+    ).toBe(dailyProcessBudget);
   });
 });

@@ -14,6 +14,12 @@ const source = process.argv
   ?.slice(9);
 if (source) url.searchParams.set("source", source);
 const drain = process.argv.includes("--drain");
+const dispatch = process.argv.includes("--dispatch");
+if (dispatch) {
+  if (process.argv.slice(2).some((arg) => arg !== "--dispatch"))
+    throw new Error("Dispatch does not accept source or backfill options");
+  url.pathname = "/internal/dispatch";
+}
 if (drain) {
   if (!source) throw new Error("Drain requires a source ID");
   url.pathname = "/internal/process";

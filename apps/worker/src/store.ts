@@ -45,7 +45,12 @@ export class D1IngestionStore implements IngestionStore {
   readonly clock: () => number;
   constructor(
     readonly db: D1Database,
-    options: { runKind?: RunKind; now?: () => number } = {},
+    readonly options: {
+      runKind?: RunKind;
+      now?: () => number;
+      maxItems?: 2 | 3;
+      respectCadence?: boolean;
+    } = {},
   ) {
     this.runKind = options.runKind ?? "poll";
     this.clock = options.now ?? Date.now;
@@ -125,10 +130,12 @@ export class D1IngestionStore implements IngestionStore {
       ).run();
     }
     const queue = await this.sql(
-      "SELECT * FROM raw_source_items WHERE source_id=? AND (status='collected' OR (status='failed' AND attempts<3) OR (rules<>? AND content NOT IN ('[expired]','[withdrawn]'))) ORDER BY CASE WHEN rules<>? THEN 0 ELSE 1 END,first_seen_at,external_id LIMIT 3",
+      "SELECT * FROM raw_source_items WHERE source_id=? AND (status='collected' OR (status='failed' AND attempts<3) OR (rules<>? AND content NOT IN ('[expired]','[withdrawn]'))) ORDER BY CASE WHEN status='collected' AND rules=? THEN 0 ELSE 1 END,CASE WHEN status='collected' AND rules=? THEN published_at END DESC,first_seen_at,external_id LIMIT ?",
       sourceId,
       ruleVersion,
       ruleVersion,
+      ruleVersion,
+      this.options.maxItems ?? 3,
     ).all<
       StoredRaw & {
         source_id: string;
@@ -167,11 +174,12 @@ export class D1IngestionStore implements IngestionStore {
       }),
     ).run();
     const lease = await this.sql(
-      `UPDATE sources SET lease_until=?${this.runKind === "poll" ? ",last_attempt_at=?" : ""} WHERE id=? AND lease_until<?`,
+      `UPDATE sources SET lease_until=?${this.runKind === "poll" ? ",last_attempt_at=?" : ""} WHERE id=? AND lease_until<?${this.options.respectCadence && this.runKind === "poll" ? " AND next_attempt_at<=?" : ""}`,
       now + 600000,
       ...(this.runKind === "poll" ? [iso] : []),
       source.id,
       now,
+      ...(this.options.respectCadence && this.runKind === "poll" ? [now] : []),
     ).run();
     if (!lease.meta.changes) return null;
     const id = crypto.randomUUID();
@@ -536,5 +544,10 @@ export async function maintainPrivateData(db: D1Database, now = Date.now()) {
         "DELETE FROM ingestion_runs WHERE id IN (SELECT id FROM ingestion_runs WHERE finished_at<? LIMIT 500)",
       )
       .bind(cutoff),
+    db
+      .prepare(
+        "DELETE FROM ingestion_tasks WHERE id IN (SELECT id FROM ingestion_tasks WHERE cycle<? LIMIT 500)",
+      )
+      .bind(now - 90 * 86400000),
   ]);
 }

@@ -26,4 +26,19 @@
     },
   ],
   "triggers": { "crons": ["0 * * * *", "15 2 * * *"] },
+  "queues": {
+    "producers": [
+      { "queue": "crime-radar-ingestion", "binding": "INGESTION_QUEUE" },
+    ],
+    "consumers": [
+      {
+        "queue": "crime-radar-ingestion",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_concurrency": 3,
+        "max_retries": 3,
+        "retry_delay": 60,
+      },
+    ],
+  },
 }
